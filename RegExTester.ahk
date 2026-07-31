@@ -619,7 +619,9 @@ class RT {
 
     ; --- gui + controls ---
     static gui := "", lvPh := "", edPhName := "", edPhPat := ""
-    static cbPh := ""              ; "Show && use sub-pattern placeholders", lblPat := "", lblSubj := "", lblEol := ""
+    static cbPh := ""              ; "Show && use sub-pattern placeholders"
+    static lblPhHint := ""         ; the "double-click a row..." hint beside it
+    static PhCbW := 240            ; measured width of cbPh, set in BuildGui, lblPat := "", lblSubj := "", lblEol := ""
     static btnAdd := "", btnDel := "", btnUp := "", btnDn := ""
     static rePattern := "", edMoreOpts := "", edEffective := ""
     static btnHist := "", btnAddHist := ""
@@ -700,11 +702,21 @@ BuildGui() {
     ; The checkbox doubles as the section label.  Note the doubled "&&": a
     ; single & in a control's text is an accelerator and would show as an
     ; underline under the "u" instead of an ampersand.
-    RT.cbPh := g.Add("CheckBox", "x10 y10 w700 h20 Checked",
-        "Show && use sub-pattern placeholders   —   double-click a row to insert %name% into the pattern")
+    ;
+    ; Deliberately created with NO width, so AHK sizes it to its own caption.
+    ; The measured result is where the hint label starts -- reading it back
+    ; beats hardcoding an offset, which would drift at 125% DPI or under any
+    ; other scaling.
+    RT.cbPh := g.Add("CheckBox", "x10 y10 Checked", "Show && use sub-pattern placeholders")
     RT.cbPh.OnEvent("Click", (*) => TogglePh())
-    ; Top-right corner.  OnSizeGui pins it to the right edge and shortens
-    ; lblPh to match.
+    RT.cbPh.GetPos(&cbX, &cbY, &cbW)
+    RT.PhCbW := cbW
+    ; A separate control rather than more caption text, so that clicking the
+    ; hint doesn't toggle the checkbox.  ApplyPhVisible() shows and hides it.
+    RT.lblPhHint := g.Add("Text", "x260 y10 w450 h20 +0x200"
+        , "—   double-click a row to insert %name% into the pattern")
+    ; Top-right corner.  OnSizeGui pins it to the right edge and gives the
+    ; hint label whatever room is left between the two.
     RT.cbTips := g.Add("CheckBox", "x846 y10 w164 h20 Checked", "Show tips on hover")
     RT.cbTips.OnEvent("Click", (*) => ToggleTips())
 
@@ -804,6 +816,7 @@ BuildGui() {
     RT.reSubject := RichEdit(g, "x10 y402 w1000 h120")
     RT.reSubject.SetDefaultFont({Name: SUBJ_FONT, Size: SUBJ_SIZE})
     RT.reSubject.WordWrap(true)
+    HideHScroll(RT.reSubject.Hwnd)      ; wraps too, so it can never scroll
     RT.reSubject.SetEventMask(["CHANGE"])
     RT.reSubject.OnCommand(0x0300, (*) => SubjectChanged())     ; EN_CHANGE
 
@@ -850,7 +863,10 @@ OnSizeGui(guiObj, MinMax, W, H) {
     ; without these the controls appear ghosted at their previous positions.
     static RDW_INVALIDATE := 0x0001, RDW_ERASE := 0x0004, RDW_ALLCHILDREN := 0x0080
     static RDW_UPDATENOW := 0x0100, RDW_FRAME := 0x0400
-    if (MinMax = -1 || !RT.lvPh)
+    ; reSubject is the last of these created in BuildGui, so testing it proves
+    ; every control this function touches exists.  Testing lvPh would not:
+    ; the list view is built before either rich edit.
+    if (MinMax = -1 || !RT.lvPh || !RT.reSubject)
         return
 
     ; Remember the size only while restored.  MinMax = 1 is maximized, and
@@ -890,10 +906,31 @@ OnSizeGui(guiObj, MinMax, W, H) {
     spare := flex - phExtra
     subjH := Max(60, Integer(spare / 2))
     tabsH := Max(150, spare - subjH)
+    ; Those two minimums are wishes, not guarantees.  When the window is short
+    ; they can between them ask for more height than `spare` actually is, and
+    ; without this the surplus runs straight off the bottom -- the tab control
+    ; is drawn over the status bar.  Showing the placeholder block is what
+    ; usually triggers it, because the block costs ~152px of fixed height plus
+    ; its 15% slice of the flex, so the same window that was fine with the
+    ; table folded away is short by 20-odd pixels with it open.
+    ;
+    ; Hand the surplus back rather than letting it overflow.  Take it from the
+    ; haystack first, down to its own minimum, then off the tabs.  A cramped
+    ; pane is recoverable by dragging the window taller; a status bar with the
+    ; warnings hidden under a list view is the bug being reported.
+    over := subjH + tabsH - spare
+    if (over > 0) {
+        give := Min(over, subjH - 60)
+        subjH -= give
+        over -= give
+        tabsH := Max(48, tabsH - over)   ; 48 keeps th (tabsH - 38) positive
+    }
 
     y := m
     tipsW := 164
-    RT.cbPh.Move(m, y, Max(120, innerW - tipsW - sp), lblH)
+    RT.cbPh.Move(m, y, RT.PhCbW, lblH)
+    hintX := m + RT.PhCbW + sp
+    RT.lblPhHint.Move(hintX, y, Max(0, m + innerW - tipsW - sp - hintX), lblH)
     RT.cbTips.Move(m + innerW - tipsW, y, tipsW, lblH)
     y += lblH
     if (phShown) {
@@ -973,6 +1010,13 @@ OnSizeGui(guiObj, MinMax, W, H) {
     RT.edCode.Move(tx, ty, tw, th)
     RT.edCheat.Move(tx, ty, tw, th)
 
+    ; Both rich edits word-wrap, so neither can ever scroll sideways -- but
+    ; being Moved above makes them re-assert a horizontal bar.  Undo that here,
+    ; still inside the redraw-off window, so the RedrawWindow below picks it up
+    ; and nothing flickers.
+    SuppressHScroll(RT.rePattern.Hwnd)
+    SuppressHScroll(RT.reSubject.Hwnd)
+
     DllCall("user32\SendMessageW", "Ptr", guiObj.Hwnd, "UInt", WM_SETREDRAW, "Ptr", 1, "Ptr", 0)
     DllCall("RedrawWindow", "Ptr", guiObj.Hwnd, "Ptr", 0, "Ptr", 0,
         "UInt", RDW_INVALIDATE | RDW_ERASE | RDW_ALLCHILDREN | RDW_UPDATENOW | RDW_FRAME)
@@ -1019,6 +1063,12 @@ ApplyPhVisible() {
     on := PhOn()
     for c in [RT.lvPh, RT.btnAdd, RT.btnDel, RT.btnUp, RT.btnDn, RT.edPhName, RT.edPhPat]
         c.Visible := on
+    RT.lblPhHint.Visible := on
+    ; The pattern label advertises %name% only while it means something.
+    if (on)
+        RT.lblPat.Text := "Pattern   (raw PCRE — use %name% to pull in a placeholder)"
+    else
+        RT.lblPat.Text := "Pattern   (raw PCRE)"
     RT.cbWrap.Enabled := on        ; nothing left to wrap
     ; Don't poll a header nobody can see.
     if (RT.TipsPh is LVHeaderToolTips)
@@ -1027,23 +1077,88 @@ ApplyPhVisible() {
         OnSizeGui(RT.gui, 0, RT.WinW, RT.WinH)
 }
 
-; The pattern box has word wrap on, so its horizontal scroll bar can never do
-; anything -- but the control still reserves and paints one.  Strip WS_HSCROLL
-; along with ES_DISABLENOSCROLL (which is what keeps a dead bar visible instead
-; of hidden) and ask for a frame recalc so the space is actually given back.
+; ------------------------ HORIZONTAL SCROLL BAR ---------------------------
+; Both rich edits have word wrap on, so neither can ever scroll sideways --
+; but the control still reserves and paints a dead horizontal bar.  Two
+; functions suppress it: HideHScroll() once at creation, and SuppressHScroll()
+; again every time the control re-lays itself out.
+;
+; The repetition is deliberate, not a leftover.  The obvious root fix -- never
+; give the control the styles in the first place -- is NOT available, because
+; of the order RichEdit.__New() assembles its option string in
+; (Tools\RichEdit.ahk, the CtrlOpts line):
+;
+;   CtrlOpts := "Class" MSFTEDIT_CLASS " " Options " +" Styles " +E" ExStyles
+;
+; The caller's Options go in first and the class's own Styles follow, and AHK
+; applies +/- style tokens left to right against a running value, so the later
+; "+Styles" wins.  Styles always carries ES_AUTOHSCROLL, plus WS_HSCROLL and
+; ES_DISABLENOSCROLL whenever MultiLine is true -- which is its default.
+; Passing "-0x102080" in the options string here is therefore a no-op.  It was
+; tried.  It does nothing.
+;
+; Stripping the bits afterwards does not fully stick either: the control
+; re-derives its scroll bars from creation-time internal state on every
+; re-layout, which is why the bar came back on two separate triggers -- a
+; resize (the placeholder toggle calls OnSizeGui, which Moves every control)
+; and a text replacement (opening a different session file).  Hence the cheap
+; repeated call rather than one fix at creation.
+;
+; Side effect worth knowing about: dropping ES_DISABLENOSCROLL unpins the
+; VERTICAL bar as well, so it now comes and goes as the text grows past the
+; box, and the wrap width shifts when it does.  Keeping the style would pin
+; the vertical bar, but it is also precisely what keeps a dead horizontal one
+; painted instead of hidden, so it has to go.
+;
+; The one-time half: strip the styles, then ask for a frame recalc so the
+; space the bar was holding is actually given back.
 HideHScroll(hwnd) {
     static GWL_STYLE := -16
-    static WS_HSCROLL := 0x00100000, ES_DISABLENOSCROLL := 0x2000
-    static SB_HORZ := 0
+    static WS_HSCROLL := 0x00100000, ES_DISABLENOSCROLL := 0x2000, ES_AUTOHSCROLL := 0x0080
     static SWP_NOSIZE := 0x1, SWP_NOMOVE := 0x2, SWP_NOZORDER := 0x4, SWP_FRAMECHANGED := 0x20
     gwl := (A_PtrSize = 8) ? "GetWindowLongPtr" : "GetWindowLong"
     swl := (A_PtrSize = 8) ? "SetWindowLongPtr" : "SetWindowLong"
     st := DllCall(gwl, "Ptr", hwnd, "Int", GWL_STYLE, "Ptr")
+    ; ES_AUTOHSCROLL is in the list because without it the control has no
+    ; reason to want a horizontal bar at all; ES_DISABLENOSCROLL is what keeps
+    ; a dead one painted instead of hidden.
     DllCall(swl, "Ptr", hwnd, "Int", GWL_STYLE
-          , "Ptr", st & ~WS_HSCROLL & ~ES_DISABLENOSCROLL, "Ptr")
-    DllCall("ShowScrollBar", "Ptr", hwnd, "Int", SB_HORZ, "Int", 0)
+          , "Ptr", st & ~WS_HSCROLL & ~ES_DISABLENOSCROLL & ~ES_AUTOHSCROLL, "Ptr")
+    SuppressHScroll(hwnd)
     DllCall("SetWindowPos", "Ptr", hwnd, "Ptr", 0, "Int", 0, "Int", 0, "Int", 0, "Int", 0
           , "UInt", SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_FRAMECHANGED)
+}
+
+; The cheap half, which has to be repeated -- see the block above HideHScroll()
+; for why once at creation is not enough.  No SetWindowPos here, just style
+; bits, so it is safe to run on every resize and every text load.  Called from
+; four places: the end of OnSizeGui for both boxes, inside the WM_SETREDRAW-off
+; window so it cannot flicker, and from SetPatternText() and SetSubjectText().
+; Confirmed to hold through both triggers.
+SuppressHScroll(hwnd) {
+    static SB_HORZ := 0
+    static EM_SHOWSCROLLBAR := 0x0460
+    ; Two calls, and the names are an unfortunate collision -- they are not the
+    ; same function:
+    ;   EM_SHOWSCROLLBAR    tells the rich edit's own layout engine
+    ;   user32\ShowScrollBar  tells the window
+    ;
+    ; The first one is RichEdit.ShowScrollBar(0, false) written out by hand:
+    ; that method is just SendMessage(0x0460, SB, !!Mode, This.HWND), same
+    ; message, same arguments.  It is spelled out here rather than called
+    ; because this runs from OnSizeGui, which fires once BEFORE Gui.Show() (see
+    ; the startup sequence), and AHK's SendMessage does window matching that
+    ; has failed on this file in early-GUI paths.  Same reason OnSizeGui uses
+    ; DllCall for WM_SETREDRAW.  Using the method would also mean passing the
+    ; RichEdit object instead of a HWND, at four call sites.
+    ;
+    ; The library has no wrapper for the second call, so the pair cannot
+    ; collapse into one method call either way.  Which of the two is actually
+    ; load bearing was never isolated -- the pair works, and dropping one would
+    ; save nothing measurable, so both stay.
+    DllCall("user32\SendMessageW", "Ptr", hwnd, "UInt", EM_SHOWSCROLLBAR
+          , "Ptr", SB_HORZ, "Ptr", 0, "Ptr")
+    DllCall("ShowScrollBar", "Ptr", hwnd, "Int", SB_HORZ, "Int", 0)
 }
 
 ; ============================== TOOLTIPS ==================================
@@ -1418,6 +1533,7 @@ SetPatternText(txt) {
     RT.rePattern.SetFont({Name: SUBJ_FONT, Size: SUBJ_SIZE, Style: "N", Color: "Auto", BkColor: "Auto"})
     RT.rePattern.SetSel(0, 0)
     RT.PatShading := false
+    SuppressHScroll(RT.rePattern.Hwnd)   ; replacing the text re-asserts it
     SchedulePatternColors()
 }
 
@@ -2783,6 +2899,7 @@ SetSubjectText(txt) {
     RE.SetFont({Name: SUBJ_FONT, Size: SUBJ_SIZE, Style: "N", Color: "Auto", BkColor: "Auto"})
     RE.SetSel(0, 0)
     RT.Shading := false
+    SuppressHScroll(RE.Hwnd)             ; replacing the text re-asserts it
     RT.Raw := CanonText()
 }
 
