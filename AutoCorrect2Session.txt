@@ -1,0 +1,22 @@
+﻿RegExTesterSession v1
+OPT=imJ
+MODE=match
+FINDALL=1
+LIVE=1
+SHADE=1
+EOL=1
+WRAP=0
+TIPS=1
+PHON=0
+WINW=1021
+WINH=774
+LIMIT=
+PAT=^:(?<Opts>[^:]+)*:(?<Trig>[^:]+)::(?:f\("(?<Repl>[^"]*)"(?:\h*,\h*(?<Log>[01]))?(?:\h*,\h*(?<Paste>[01]))?\)|(?<Repl>[\s\S]+?)(?=\h+;|\z))?(?<Comm>\h+;.+)?$
+REPL=
+SUBJ=Note:  The above big regex was written by AndyMBody.&r;; Vanilla AHK hotstring &r;::trigger::replacement&r;::;rrr::reading, writing, and math&r;:B0X*:alltime::f("all-time") ; Fixes 1 word &r;:B0X*:alma matter::f("alma mater") ; Fixes 1 word&r;&r;:B0X*:along it's::f("along its") ; Fixes 1 word&r;&r;; To-be-typed boilerplate items are now wrapped in f() function calls.  This allows InputBuffering with Descolada's InputBuffer class.  We don't want to log these, so they get '0' as a second param.  We want to type (not paste) them, and paste=0 is the default, so no need to include the third param. &r;:B0X:;sdda::f("Developmental Disabilities Administration (DDA)", 0)&r;:B0X:;sdi::f("specially-designed instruction", 0)&r;:B0X:;sdial::f("Developmental Indicators for the Assessment of Learning-Fourth Ed (DIAL-4)", 0)&r;&r;; This is a larger boilerplate item.  It also does not get logged (only AutoCorrections get logged) so it needs the second param.  Also, it does get pasted, rather than typed, which is not the f() default, so the third param is also needed. &r;:B0X:;rrrr::f("&r;(RTrim0&r;Basic Reading&t;&t;&r;Reading Comprehension&t;&r;Reading Fluency&t;&t;&r;Math Calculations&t;&r;Applied Math&t;&t;&r;Written Expression&t;&r;)",0,1)&r;&r;&r;::ttfn::f("Ta Ta For Now (TTFN)")&r;&r;&r;:B0X:;homer::f("&r;(&r;Homer Simpson&r;Marge Simpson&r;Bart Simpson&r;Lisa Simpson&r;Maggie Simpson&r;Ned Flanders&r;Maude Flanders&r;Rod Flanders&r;Todd Flanders&r;Seymour Skinner&r;Edna Krabappel&r;Moe Szyslak&r;Barney Gumble&r;Apu Nahasapeemapetilon&r;Clancy Wiggum&r;Ralph Wiggum&r;Milhouse Van Houten&r;Nelson Muntz&r;Martin Prince&r;Comic Book Guy&r;Sideshow Bob&r;Krusty the Clown&r;Superintendent Chalmers&r;Otto Mann&r;Agnes Skinner&r;)",0,1)&r;&r;:B0X:;homer2::f("Homer Simpson`nMarge Simpson`nBart Simpson`nLisa Simpson`nMaggie Simpson`nNed Flanders`nMaude Flanders`nRod Flanders`nTodd Flanders`nSeymour Skinner`nEdna Krabappel`nMoe Szyslak`nBarney Gumble`nApu Nahasapeemapetilon`nClancy Wiggum`nRalph Wiggum`nMilhouse Van Houten`nNelson Muntz`nMartin Prince`nComic Book Guy`nSideshow Bob`nKrusty the Clown`nSuperintendent Chalmers`nOtto Mann`nAgnes Skinner2", 0, 1)&r;&r;:B0X:mltest::f(" ; Optional comment here&r;(&r;One&r;Two&r;Three&r;)",0) ; What about this comment?&r;&r;:B0X:mltest::f(" ; Optional comment here&r;(&r;One&r;Two&r;Three&r;)",0,1)&r;&r;:B0X:mltest::f(" ; Optional comment here&r;(&r;One&r;Two (parenth not at beginning of line)&r;Three&r;)",0,1)&r;&r;::;trig::replacement ;This is a comment.&r;::;trig::replacement;This not is a comment.
+HIST=^:(?<Opts>[^:]+)*:(?<Trig>[^:]+)::(?:f\("(?<Repl>[^"]*)"(?:\h*,\h*(?<Log>[01]))?(?:\h*,\h*(?<Paste>[01]))?\)|(?<Repl>[\s\S]+?)(?=\h+;|\z))?(?<Comm>\h+;.+)?$
+HIST=%reDateWord%
+HIST=%reMonth%\s%re1st31st%
+HIST=%reMonth%|%re1st31st%|%reWDay%|%re2WeeksPre%|%re2WeeksSuf%|%reDateWord%|%reTimPre%|%reTime%
+HIST=%reTime%
+HIST=%reWDay%\sin\s%re2WeeksPre%

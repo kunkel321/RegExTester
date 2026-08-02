@@ -1,6 +1,6 @@
 ﻿#Requires AutoHotkey v2.0
 #SingleInstance Force
-#Include %A_ScriptDir%\Tools\RichEdit.ahk    ; <-- by "just me"; same copy SpeedReader uses
+#Include %A_ScriptDir%\Tools\RichEdit.ahk ; https://github.com/AHK-just-me/AHK2_RichEdit
 SetWorkingDir(A_ScriptDir)
 
 ; Distinguishes this script from the other AHK tools in the tray.  Bare try:
@@ -13,7 +13,7 @@ try TraySetIcon("imageres.dll", 20)          ; a window with a green checkmark
 ;#################################
 ; App: REGEX TESTER for AHK v2
 ; By: kunkel321 (with Claude)
-; Date: 7-29-2026
+; Date: 8-2-2026
 ;#################################
 ; A live RegEx tester that runs on AutoHotkey's own PCRE engine, so what you
 ; see here is exactly what RegExMatch()/RegExReplace() will do in a script.
@@ -63,28 +63,63 @@ global SUBJ_SIZE    := 11
 global MAX_SHADED   := 400             ; stop shading past this many matches
 global MAX_MATCHES  := 5000            ; hard cap on the find-all loop
 global RUN_DELAY    := 300             ; ms of idle before a live re-run
-global COLOR_DELAY  := 150             ; ms of idle before recolouring the pattern
-global MAX_HISTORY  := 25              ; remembered patterns
+global COLOR_DELAY  := 150             ; ms of idle before reColoring the pattern
+global MAX_SNIPPETS := 25              ; banked patterns
 global APP_TITLE    := "RegEx Tester for AHK v2"
 global TIP_WIDTH    := 560             ; px before a hover tip wraps (see
                                        ;   TipMaxWidth; both tooltip libraries
                                        ;   default to "never wrap")
 
-; --- pattern box syntax colours -------------------------------------------
-; Set PAT_FULL_SYNTAX false to colour only the %placeholders% and leave the
-; rest of the pattern plain black.
+; --- pattern box syntax Colors -------------------------------------------
+; Set PAT_FULL_SYNTAX false to Color only the %placeholders% and leave the
+; rest of the pattern plain black.  That also switches off the matching-paren
+; highlight, since the pairing comes out of the same parse.
+;
+; The palette is grouped by MEANING rather than by character, so that things
+; which behave alike look alike:
+;     green   asserts a position and consumes nothing  (^ $ \b \A, and the
+;             ?= ?! ?<= ?<! of a lookaround)
+;     teal    matches a character                      (\d \w \s \p{L})
+;     blue    repetition                               (* + ? {2,5})
+;     orange  character class, plus a pale tint across the whole [...]
+;     purple / blue / amber, cycling: nesting depth
+;     grey    punctuation that only holds a construct together
+;
+; White on red is reserved for things PCRE will REFUSE TO COMPILE, so red
+; always means broken and never merely unusual.  Notably NOT red: a lone "]",
+; a lone "}", and a "{" that is not a quantifier.  PCRE demotes all three to
+; ordinary literal characters, so they get PC_LITERAL -- "you typed a
+; metacharacter, but here it is only a character" -- which is the honest
+; answer.  Calling them errors would condemn patterns that work fine.
 global PAT_FULL_SYNTAX := true
 global PC_PH_FG    := 0x000090, PC_PH_BG    := 0xDCE9FF   ; %known% placeholder
 global PC_BADPH_FG := 0x900000, PC_BADPH_BG := 0xFFD6D6   ; %unknown% placeholder
-global PC_BAD_FG   := 0xFFFFFF, PC_BAD_BG   := 0xD04040   ; unbalanced ( or [
-global PC_ESC      := 0x008080         ; \d \b \s \1 ...
-global PC_CLASS    := 0xB05000         ; [abc] character class
+global PC_BAD_FG   := 0xFFFFFF, PC_BAD_BG   := 0xD04040   ; will not compile
+global PC_ESC      := 0x008080         ; \d \w \s \h \p{L} -- matches a character
+global PC_ESCNUM   := 0x0090B0         ; \x41 \x{263A} \cA \t -- one code point
+global PC_ESCLIT   := 0x9A6B3A         ; \. \( \\ -- metacharacter made ordinary
+global PC_BACKREF  := 0x2040E0         ; \1 \k<name> (?P=name) (?&name)
+global PC_CLASS    := 0xB05000         ; the [ ^ ] of a character class
+global PC_CLASS_BG := 0xFFF2E4         ; tint across the whole class, so it reads
+                                       ;   as one unit while its contents keep
+                                       ;   their own foreground Colors
+global PC_RANGE    := 0xD07000         ; the - in [a-z]
+global PC_POSIX    := 0x8040A0         ; [:alpha:] and friends
 global PC_QUANT    := 0x0060C0         ; * + ? {2,5}
+global PC_LAZY     := 0x60A8E8         ; the ? or + that makes one lazy/possessive
 global PC_ALT      := 0xC000C0         ; |
-global PC_ANCHOR   := 0x008000         ; ^ $
+global PC_ANCHOR   := 0x008000         ; ^ $ \b \A \z, and (?= (?! (?<= (?<!
 global PC_DOT      := 0x909000         ; .
-global PC_SPECIAL  := 0x707070         ; (?i) inline options
+global PC_SPECIAL  := 0x707070         ; (?i) (?(1) (*SKIP) -- inline directives
+global PC_NONCAP   := 0x9A9AB0         ; the ?: ?> ?< > plumbing of a group
+global PC_GNAME    := 0x2050B0         ; the name itself in (?<name>...)
 global PC_COMMENT  := 0x808080         ; (?#...) and, with x, #comments
+global PC_LITERAL  := 0xA0A0A0         ; ] } and a { that is not a quantifier
+global PC_XWS_BG   := 0xF2F2F2         ; with x, whitespace the engine discards.
+                                       ;   Whitespace has no ink to dim, so the
+                                       ;   only way to show it is behind it --
+                                       ;   set to "" to leave it untinted.
+global PC_PARMATCH_BG := 0xB6E3FF      ; the ( ) pair on either side of the caret
 global PC_PAREN    := [0x6A00C0, 0x0077A8, 0xB07000]   ; group depth, cycling
 
 ; Option letters, in the canonical order they get emitted.
@@ -601,11 +636,20 @@ class RT {
     static Subject  := ""          ; text the regex was actually run against
     static Raw      := ""          ; canonical CR-per-break copy of the haystack
     static Loading  := false       ; suppresses live re-run during bulk updates
-    static Shading  := false       ; suppresses EN_CHANGE while we recolour
+    static Shading  := false       ; suppresses EN_CHANGE while we reColor
     static PatShading := false     ; ditto, for the pattern box
-    static LastPatText := ""       ; pattern text as of the last recolour
-    static History  := []          ; saved patterns, newest first
-    static HistDelete := false     ; next history pick removes instead of loads
+    static LastPatText := ""       ; pattern text as of the last reColor
+
+    ; --- matching-paren highlight, all filled in by ApplyPatternColors ---
+    static PatPairs   := ""        ; 0-based paren position -> its partner's
+    static PatParenFg := ""        ; 0-based paren position -> its normal Color
+    static PatHL      := ""        ; [openPos, closePos] lit right now, or ""
+    static ParenBusy  := false     ; stops our own SetSel re-entering EN_SELCHANGE
+
+    ; --- the Color Key window, built once and then hidden/shown ---
+    static keyGui := "", keyRE := "", keyBtn := ""
+    static Snippets := []          ; banked patterns, newest first
+    static SnipDelete := false     ; next snippet pick removes instead of loads
     static NoJump   := false       ; suppresses caret movement on auto-selection
     static CurPh    := 0           ; placeholder row currently being edited
     static LastErr  := ""
@@ -624,7 +668,7 @@ class RT {
     static PhCbW := 240            ; measured width of cbPh, set in BuildGui, lblPat := "", lblSubj := "", lblEol := ""
     static btnAdd := "", btnDel := "", btnUp := "", btnDn := ""
     static rePattern := "", edMoreOpts := "", edEffective := ""
-    static btnHist := "", btnAddHist := ""
+    static btnSnips := "", btnAddSnip := "", btnKey := ""
     static lblOpts := "", lblMore := "", lblEff := "", cbWrap := ""
     static rdMatch := "", rdReplace := "", lblRepl := "", edRepl := ""
     static lblLimit := "", edLimit := "", cbAll := "", cbLive := ""
@@ -744,18 +788,25 @@ BuildGui() {
     ; ---------- main pattern ----------
     FontUI(g)
     RT.lblPat := g.Add("Text", "x10 y176 w700 h20 +0x200", "Pattern   (raw PCRE — use %name% to pull in a placeholder)")
-    RT.btnAddHist := g.Add("Button", "x706 y174 w110 h22", "Add to History")
-    RT.btnAddHist.OnEvent("Click", (*) => AddCurrentToHistory())
-    RT.btnHist := g.Add("Button", "x820 y174 w96 h22", "History  " Chr(0x25BE))
-    RT.btnHist.OnEvent("Click", (*) => ShowHistoryMenu())
+    RT.btnKey := g.Add("Button", "x616 y174 w86 h22", "Color Key")
+    RT.btnKey.OnEvent("Click", (*) => ShowColorKey())
+    RT.btnAddSnip := g.Add("Button", "x706 y174 w110 h22", "Add Snippet")
+    RT.btnAddSnip.OnEvent("Click", (*) => AddCurrentSnippet())
+    RT.btnSnips := g.Add("Button", "x820 y174 w96 h22", "Snippets  " Chr(0x25BE))
+    RT.btnSnips.OnEvent("Click", (*) => ShowSnippetMenu())
 
-    ; Also a rich edit, so placeholders and regex syntax can be coloured.
+    ; Also a rich edit, so placeholders and regex syntax can be Colored.
     RT.rePattern := RichEdit(g, "x10 y196 w900 h48")
     RT.rePattern.SetDefaultFont({Name: SUBJ_FONT, Size: SUBJ_SIZE})
     RT.rePattern.WordWrap(true)
     HideHScroll(RT.rePattern.Hwnd)      ; word wrap is on, so it can never scroll
-    RT.rePattern.SetEventMask(["CHANGE"])
+    ; SELCHANGE is what drives the matching-paren highlight.  It fires on plain
+    ; caret movement as well as on real selections, which is exactly what is
+    ; wanted -- but only while ENM_SELCHANGE is in the event mask, so the two
+    ; lines below have to stay together.
+    RT.rePattern.SetEventMask(["CHANGE", "SELCHANGE"])
     RT.rePattern.OnCommand(0x0300, (*) => PatternChanged())     ; EN_CHANGE
+    RT.rePattern.OnNotify(0x0702, (*) => UpdateParenMatch())    ; EN_SELCHANGE
 
     ; ---------- options row ----------
     FontUI(g)
@@ -951,9 +1002,10 @@ OnSizeGui(guiObj, MinMax, W, H) {
         y += sp                         ; keep phBlockH and the layout in step
     }
 
-    RT.lblPat.Move(m, y, Max(160, innerW - 226), lblH)
-    RT.btnAddHist.Move(m + innerW - 212, y - 2, 110, lblH + 2)
-    RT.btnHist.Move(m + innerW - 96, y - 2, 96, lblH + 2)
+    RT.lblPat.Move(m, y, Max(160, innerW - 318), lblH)
+    RT.btnKey.Move(m + innerW - 304, y - 2, 86, lblH + 2)
+    RT.btnAddSnip.Move(m + innerW - 212, y - 2, 110, lblH + 2)
+    RT.btnSnips.Move(m + innerW - 96, y - 2, 96, lblH + 2)
     y += lblH
     RT.rePattern.Move(m, y, innerW, patH)
     y += patH + sp
@@ -1221,12 +1273,17 @@ AttachToolTips() {
       . "string literal.  Options belong in the checkboxes below, not at the`n"
       . "front of the pattern.`n`n"
       . "Double-click a placeholder row to drop its %name% in at the caret.")
-    CtrlToolTip(RT.btnAddHist,
-        "Banks the current pattern in the History list.`n`n"
+    CtrlToolTip(RT.btnKey,
+        "Opens a legend for the pattern box: every Coloring rule, shown in`n"
+      . "the Color it actually produces, next to a sample that produces it.`n`n"
+      . "The samples are run through the same tokenizer that Colors the`n"
+      . "pattern box, so the legend cannot fall out of date.")
+    CtrlToolTip(RT.btnAddSnip,
+        "Banks the current pattern in the Snippets list.`n`n"
       . "Nothing is ever recorded automatically -- a pattern is remembered`n"
       . "only when you press this, so the list stays worth reading.")
-    CtrlToolTip(RT.btnHist,
-        "Recall, remove or clear a banked pattern.  The last " MAX_HISTORY "`n"
+    CtrlToolTip(RT.btnSnips,
+        "Recall, remove or clear a banked pattern.  The last " MAX_SNIPPETS "`n"
       . "are kept, newest first, and they are saved with the session.")
 
     ; --- options ----------------------------------------------------------
@@ -1312,7 +1369,7 @@ AttachToolTips() {
     CtrlToolTip(RT.lblEol,  EolTipText())
     CtrlToolTip(RT.ddlEol,  EolTipText())
     CtrlToolTip(RT.cbShade,
-        "Tints each match in the haystack, alternating two colours so that`n"
+        "Tints each match in the haystack, alternating two Colors so that`n"
       . "two matches which touch stay distinguishable.`n`n"
       . "Shading pushes entries onto the rich edit's undo stack, so Ctrl+Z`n"
       . "in that pane can take a few presses to reach your own typing.")
@@ -1533,20 +1590,25 @@ SetPatternText(txt) {
     RT.rePattern.SetFont({Name: SUBJ_FONT, Size: SUBJ_SIZE, Style: "N", Color: "Auto", BkColor: "Auto"})
     RT.rePattern.SetSel(0, 0)
     RT.PatShading := false
+    RT.PatPairs := "", RT.PatHL := ""    ; the reset above cleared any highlight
     SuppressHScroll(RT.rePattern.Hwnd)   ; replacing the text re-asserts it
     SchedulePatternColors()
 }
 
 PatternChanged() {
-    if (RT.PatShading)                       ; our own recolouring
+    if (RT.PatShading)                       ; our own reColoring
         return
     if (PatternText() == RT.LastPatText)     ; formatting-only notification
         return
+    ; Every offset in the pairing map just moved.  Drop it rather than let the
+    ; caret highlight two arbitrary characters during the COLOR_DELAY window
+    ; before ApplyPatternColors() rebuilds it.
+    RT.PatPairs := "", RT.PatHL := ""
     SchedulePatternColors()
     ScheduleRun()
 }
 
-; Colouring is scheduled independently of ScheduleRun() so that the pattern
+; Coloring is scheduled independently of ScheduleRun() so that the pattern
 ; box stays live even when the "Live" checkbox is off — it costs nothing,
 ; since it never runs the regex against the haystack.
 SchedulePatternColors() {
@@ -1555,26 +1617,72 @@ SchedulePatternColors() {
     SetTimer(ApplyPatternColors, -COLOR_DELAY)
 }
 
-; Left-to-right tokenizer.  It is a highlighter, not a validator: anything it
-; can't classify is simply left in the default colour.  Returns an array of
-; {s, e, fg, bg} runs using zero-based, end-exclusive offsets.
-TokenizePattern(pat) {
-    runs := [], openStack := [], depth := 0
+; ==========================================================================
+;                        PATTERN SYNTAX ColorING
+; ==========================================================================
+; AnalyzePattern() is one left-to-right pass over the raw pattern.  It is first
+; and foremost a HIGHLIGHTER -- anything it cannot classify keeps the default
+; Color rather than being called a mistake -- but it does flag the handful of
+; constructs PCRE itself will not compile.  That division is the whole design
+; rule: white-on-red means "this pattern will not run", never "this looks odd
+; to me".  Anything merely unusual gets a Color, not an accusation.
+;
+; Two consequences worth spelling out, because they look like omissions:
+;
+;   * A lone "]", a lone "}", and a "{" that is not quantifier-shaped are NOT
+;     errors.  Outside a character class PCRE demotes all three to ordinary
+;     literal characters.  They get PC_LITERAL, which says "that bracket is
+;     not doing what it looks like" without pretending the pattern is broken.
+;
+;   * A quantifier is only called out when there is unambiguously nothing to
+;     repeat -- at the very start, straight after "(", after "|", or after a
+;     quantifier that has already been consumed.  \b* and ^* are left alone,
+;     because PCRE accepts them and a false red is worse than a missed one.
+;
+; Returns {runs, pairs, parenFg}:
+;   runs    -- array of {s, e, fg, bg, st}, zero-based and end-exclusive.
+;              "" in fg, bg or st means "leave that attribute alone".  That is
+;              what lets the pale tint over a character class survive while the
+;              escapes inside it get their own foreground Colors painted on
+;              top, in a later run over the same characters.
+;   pairs   -- Map of 0-based paren position -> its partner's position, filled
+;              in both directions.  Drives the caret's matching-paren
+;              highlight, and is the reason that feature can ignore an escaped
+;              \( or a "(" sitting inside a character class.
+;   parenFg -- Map of 0-based paren position -> the Color it was painted, so
+;              the highlight can be lifted again without re-running the pass.
+; The three optional parameters exist for the Color Key window, which has to
+; render each specimen the same way every time regardless of which option boxes
+; happen to be ticked.  Left unset -- which is every call from the pattern box
+; -- they fall through to the live controls, so ordinary Coloring is unchanged.
+AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
+    runs := [], pairs := Map(), parenFg := Map(), openStack := []
+    names := Map(), nameDefs := [], backrefs := []
+    names.CaseSense := true              ; PCRE subpattern names are case-sensitive
+    depth := 0, capCount := 0
+    lastAtom := false                    ; is there anything a quantifier could repeat?
     n := StrLen(pat), i := 1
-    xMode := RT.optBoxes["x"].Value
+
+    ; The x and J options change what is legal, so the Coloring has to know
+    ; about the checkboxes.  Guarded because a stray early call would otherwise
+    ; die on an empty optBoxes map.
+    xMode := IsSet(xOpt) ? xOpt : (RT.optBoxes.Has("x") ? RT.optBoxes["x"].Value : 0)
+    jMode := IsSet(jOpt) ? jOpt : (RT.optBoxes.Has("J") ? RT.optBoxes["J"].Value : 0)
+
+    if (!PAT_FULL_SYNTAX) {
+        PushPlaceholders(pat, runs, phMap?)
+        return {runs: runs, pairs: pairs, parenFg: parenFg}
+    }
+
     while (i <= n) {
         c := SubStr(pat, i, 1)
 
-        ; --- %placeholder% : the whole point of this tester -----------------
-        if (PhOn() && c = "%" && RegExMatch(pat, "A)%([A-Za-z_]\w*)%", &pm, i)) {
-            known := RT.PhMap.Has(pm[1])
-            runs.Push({s: i - 1, e: i - 1 + pm.Len,
-                       fg: known ? PC_PH_FG : PC_BADPH_FG,
-                       bg: known ? PC_PH_BG : PC_BADPH_BG})
-            i += pm.Len
-            continue
-        }
-        if (!PAT_FULL_SYNTAX) {
+        ; --- whitespace the x option throws away ---------------------------
+        ; lastAtom is deliberately NOT touched here: in "a *" the star still
+        ; repeats the a, because the space is gone before PCRE ever sees it.
+        if (xMode && (c = " " || c = "`t" || c = "`r" || c = "`n")) {
+            if (PC_XWS_BG != "")
+                runs.Push({s: i - 1, e: i, fg: "", bg: PC_XWS_BG, st: ""})
             i++
             continue
         }
@@ -1583,113 +1691,569 @@ TokenizePattern(pat) {
         if (xMode && c = "#") {
             e := InStr(pat, "`n", , i)
             e := e ? e - 1 : n
-            runs.Push({s: i - 1, e: e, fg: PC_COMMENT, bg: ""})
+            runs.Push({s: i - 1, e: e, fg: PC_COMMENT, bg: "", st: ""})
             i := e + 1
             continue
         }
 
-        ; --- escape sequence -----------------------------------------------
-        if (c = "\") {
-            len := 2
-            if (SubStr(pat, i + 1, 1) = "x" && SubStr(pat, i + 2, 1) = "{")
-                len := (cl := InStr(pat, "}", , i + 2)) ? cl - i + 1 : 2
-            if (i = n)                                  ; trailing lone backslash
-                runs.Push({s: i - 1, e: i, fg: PC_BAD_FG, bg: PC_BAD_BG})
-            else
-                runs.Push({s: i - 1, e: i - 1 + len, fg: PC_ESC, bg: ""})
-            i += len
+        ; --- \Q ... \E : everything between is literal ----------------------
+        if (c = "\" && SubStr(pat, i + 1, 1) = "Q") {
+            q := InStr(pat, "\E", , i + 2)
+            runs.Push({s: i - 1, e: i + 1, fg: PC_ESC, bg: "", st: ""})
+            if (q) {
+                if (q > i + 2)
+                    runs.Push({s: i + 1, e: q - 1, fg: PC_ESCLIT, bg: "", st: ""})
+                runs.Push({s: q - 1, e: q + 1, fg: PC_ESC, bg: "", st: ""})
+                i := q + 2
+            } else {                          ; unterminated \Q runs to the end
+                if (n > i + 1)
+                    runs.Push({s: i + 1, e: n, fg: PC_ESCLIT, bg: "", st: ""})
+                i := n + 1
+            }
+            lastAtom := true
             continue
         }
 
-        ; --- character class -----------------------------------------------
+        ; --- every other escape ---------------------------------------------
+        if (c = "\") {
+            es := ScanEscape(pat, i, n, false)
+            bad := (es.kind = "bad")
+            runs.Push({s: i - 1, e: i - 1 + es.len,
+                       fg: bad ? PC_BAD_FG : EscColor(es.kind),
+                       bg: bad ? PC_BAD_BG : "", st: ""})
+            if (es.kind = "backref" && es.ref != "")
+                backrefs.Push({s: i - 1, e: i - 1 + es.len, ref: es.ref})
+            i += es.len
+            lastAtom := true
+            continue
+        }
+
+        ; --- character class -------------------------------------------------
         if (c = "[") {
-            j := i + 1
-            if (SubStr(pat, j, 1) = "^")
-                j++
-            if (SubStr(pat, j, 1) = "]")                ; a leading ] is literal
-                j++
-            while (j <= n) {
-                ch := SubStr(pat, j, 1)
-                if (ch = "\") {
-                    j += 2
+            nxt := ScanClass(pat, i, n, runs)
+            if (!nxt)                         ; unterminated; the rest is already red
+                break
+            i := nxt
+            lastAtom := true
+            continue
+        }
+
+        ; --- everything that starts with "(" ---------------------------------
+        if (c = "(") {
+            ; (*ACCEPT) (*SKIP:label) (*UTF) -- backtracking control verbs.
+            ; Tested first because the old tokenizer read the "*" as a
+            ; quantifier and let the "(" open a group that never closed, so a
+            ; perfectly good verb produced a spurious unbalanced-paren error.
+            if RegExMatch(pat, "A)\(\*[A-Za-z_]*(:[^)]*)?\)", &gm, i) {
+                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_SPECIAL, bg: "", st: ""})
+                i += gm.Len
+                lastAtom := true
+                continue
+            }
+            ; (?#...) -- comment
+            if RegExMatch(pat, "A)\(\?#[^)]*\)", &gm, i) {
+                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_COMMENT, bg: "", st: ""})
+                i += gm.Len
+                continue
+            }
+            ; (?i) (?-x) (?^im) -- an option SET, not a group: no depth change
+            if RegExMatch(pat, "A)\(\?\^?[imsxJUXn]*(-[imsxJUXn]+)?\)", &gm, i) {
+                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_SPECIAL, bg: "", st: ""})
+                i += gm.Len
+                continue
+            }
+            ; (?C) (?C7) -- callout
+            if RegExMatch(pat, "A)\(\?C\d*\)", &gm, i) {
+                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_SPECIAL, bg: "", st: ""})
+                i += gm.Len
+                continue
+            }
+            ; (?R) (?1) (?-2) (?&name) (?P>name) (?P=name) -- recursion and
+            ; subroutine calls.  Complete tokens, so they open nothing.
+            if RegExMatch(pat, "A)\(\?(P=(\w+)|P>(\w+)|&(\w+)|R|[+-]?\d+)\)", &gm, i) {
+                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_BACKREF, bg: "", st: ""})
+                nm := gm[2] != "" ? gm[2] : (gm[3] != "" ? gm[3] : gm[4])
+                if (nm != "")
+                    backrefs.Push({s: i - 1, e: i - 1 + gm.Len, ref: nm})
+                i += gm.Len
+                lastAtom := true
+                continue
+            }
+            ; (?(1)yes|no) (?(<name>)...) (?(DEFINE)...) -- conditional group.
+            ; The whole condition is eaten as the opener so its ")" does not
+            ; get counted as closing anything.  The (?(?=...)...) form is not
+            ; matched here on purpose: it falls through to the generic "(?"
+            ; branch below, which opens one group and lets the inner assertion
+            ; open and close its own -- which comes out with the depth right.
+            if RegExMatch(pat, "A)\(\?\((\d+|<\w+>|'\w+'|R\d*|R&\w+|DEFINE|[+-]\d+)\)", &gm, i) {
+                col := ParenColor(depth)
+                runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
+                runs.Push({s: i, e: i - 1 + gm.Len, fg: PC_SPECIAL, bg: "", st: ""})
+                parenFg[i - 1] := col
+                openStack.Push(i - 1), depth++
+                i += gm.Len
+                lastAtom := false
+                continue
+            }
+
+            if (SubStr(pat, i + 1, 1) = "?") {
+                ; --- named capturing group: (?<name>  (?'name'  (?P<name> ----
+                ; The bracket itself keeps the depth Color so the group is
+                ; still findable by shape; only the plumbing and the name get
+                ; their own treatment.
+                if RegExMatch(pat, "A)\(\?(P?<|')([A-Za-z_]\w*)(>|')", &gm, i) {
+                    lead := 2 + StrLen(gm[1])          ; "(" + "?" + "<" / "P<" / "'"
+                    nmS  := i - 1 + lead
+                    nmE  := nmS + StrLen(gm[2])
+                    col  := ParenColor(depth)
+                    runs.Push({s: i - 1, e: i,  fg: col,       bg: "", st: ""})
+                    runs.Push({s: i,     e: nmS, fg: PC_NONCAP, bg: "", st: ""})
+                    runs.Push({s: nmS,   e: nmE, fg: PC_GNAME,  bg: "", st: "B"})
+                    runs.Push({s: nmE, e: i - 1 + gm.Len, fg: PC_NONCAP, bg: "", st: ""})
+                    parenFg[i - 1] := col
+                    nameDefs.Push({s: nmS, e: nmE, name: gm[2]})
+                    names[gm[2]] := names.Has(gm[2]) ? names[gm[2]] + 1 : 1
+                    capCount++
+                    openStack.Push(i - 1), depth++
+                    i += gm.Len
+                    lastAtom := false
                     continue
                 }
-                if (ch = "]")
-                    break
-                j++
+                ; --- lookaround: (?=  (?!  (?<=  (?<! ------------------------
+                ; Green, the same as ^ $ \b, because they are the same kind of
+                ; thing: they assert about a position and consume nothing.
+                ; (The \w+ in the test above cannot match "=" or "!", so a
+                ; lookbehind can never be mistaken for a named group.)
+                if RegExMatch(pat, "A)\(\?(<[=!]|[=!])", &gm, i) {
+                    col := ParenColor(depth)
+                    runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
+                    runs.Push({s: i, e: i - 1 + gm.Len, fg: PC_ANCHOR, bg: "", st: ""})
+                    parenFg[i - 1] := col
+                    openStack.Push(i - 1), depth++
+                    i += gm.Len
+                    lastAtom := false
+                    continue
+                }
+                ; --- (?:  (?i:  (?-x:  (?>  (?| ------------------------------
+                ; Scoped option groups used to fall off the end of this chain
+                ; and get two characters Colored out of four.
+                if RegExMatch(pat, "A)\(\?(\^?[imsxJUXn]*(-[imsxJUXn]+)?:|>|\|)", &gm, i) {
+                    col := ParenColor(depth)
+                    runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
+                    runs.Push({s: i, e: i - 1 + gm.Len, fg: PC_NONCAP, bg: "", st: ""})
+                    parenFg[i - 1] := col
+                    openStack.Push(i - 1), depth++
+                    i += gm.Len
+                    lastAtom := false
+                    continue
+                }
+                ; --- some "(?" form this tokenizer does not know -------------
+                ; Opened as a plain group rather than flagged, so that one
+                ; unrecognized construct cannot cascade into a string of
+                ; bogus unbalanced-paren errors further along the pattern.
+                col := ParenColor(depth)
+                runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
+                runs.Push({s: i, e: i + 1, fg: PC_SPECIAL, bg: "", st: ""})
+                parenFg[i - 1] := col
+                openStack.Push(i - 1), depth++
+                i += 2
+                lastAtom := false
+                continue
             }
-            unterminated := (j > n)
-            e := unterminated ? n : j
-            runs.Push({s: i - 1, e: e, fg: unterminated ? PC_BAD_FG : PC_CLASS,
-                       bg: unterminated ? PC_BAD_BG : ""})
-            i := e + 1
+
+            ; --- plain capturing group -------------------------------------
+            col := ParenColor(depth)
+            runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
+            parenFg[i - 1] := col
+            capCount++
+            openStack.Push(i - 1), depth++
+            i++
+            lastAtom := false
             continue
         }
 
-        ; --- groups ---------------------------------------------------------
-        if (c = "(") {
-            if RegExMatch(pat, "A)\(\?[imsxUXJ-]*\)", &gm, i) {          ; (?i) etc
-                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_SPECIAL, bg: ""})
-                i += gm.Len
-                continue
-            }
-            if RegExMatch(pat, "A)\(\?#[^)]*\)", &gm, i) {               ; comment
-                runs.Push({s: i - 1, e: i - 1 + gm.Len, fg: PC_COMMENT, bg: ""})
-                i += gm.Len
-                continue
-            }
-            len := 1
-            if (SubStr(pat, i + 1, 1) = "?") {
-                len := RegExMatch(pat, "A)\(\?(P?<[A-Za-z_]\w*>|'[A-Za-z_]\w*'|<[=!]|[:=!>|])", &gm, i)
-                     ? gm.Len : 2
-            }
-            openStack.Push(i - 1)
-            runs.Push({s: i - 1, e: i - 1 + len,
-                       fg: PC_PAREN[Mod(depth, PC_PAREN.Length) + 1], bg: ""})
-            depth++
-            i += len
-            continue
-        }
         if (c = ")") {
             if (depth > 0) {
                 depth--
-                openStack.Pop()
-                runs.Push({s: i - 1, e: i, fg: PC_PAREN[Mod(depth, PC_PAREN.Length) + 1], bg: ""})
+                op  := openStack.Pop()
+                col := ParenColor(depth)      ; same depth the opener was given
+                runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
+                parenFg[i - 1] := col
+                pairs[op] := i - 1
+                pairs[i - 1] := op
+                lastAtom := true
             } else {
-                runs.Push({s: i - 1, e: i, fg: PC_BAD_FG, bg: PC_BAD_BG})
+                runs.Push({s: i - 1, e: i, fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+                lastAtom := false
             }
             i++
             continue
         }
 
-        ; --- the small fry ---------------------------------------------------
-        if (c = "|")
-            runs.Push({s: i - 1, e: i, fg: PC_ALT, bg: ""})
-        else if (c = "*" || c = "+" || c = "?")
-            runs.Push({s: i - 1, e: i, fg: PC_QUANT, bg: ""})
-        else if (c = "{" && RegExMatch(pat, "A)\{\d+(,\d*)?\}", &qm, i)) {
-            runs.Push({s: i - 1, e: i - 1 + qm.Len, fg: PC_QUANT, bg: ""})
-            i += qm.Len
+        ; --- quantifiers, with their lazy / possessive suffix ---------------
+        if (c = "*" || c = "+" || c = "?"
+            || (c = "{" && RegExMatch(pat, "A)\{\d+(,\d*)?\}", &qm, i))) {
+            qLen := (c = "{") ? qm.Len : 1
+            if (!lastAtom) {
+                ; PCRE: "quantifier does not follow a repeatable item"
+                runs.Push({s: i - 1, e: i - 1 + qLen,
+                           fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+            } else {
+                runs.Push({s: i - 1, e: i - 1 + qLen, fg: PC_QUANT, bg: "", st: ""})
+                sfx := SubStr(pat, i + qLen, 1)
+                if (sfx = "?" || sfx = "+") {  ; a?? is lazy, a?+ is possessive
+                    runs.Push({s: i - 1 + qLen, e: i + qLen,
+                               fg: PC_LAZY, bg: "", st: ""})
+                    qLen++
+                }
+            }
+            i += qLen
+            lastAtom := false                  ; so a third ? in a??? is caught
             continue
         }
-        else if (c = "^" || c = "$")
-            runs.Push({s: i - 1, e: i, fg: PC_ANCHOR, bg: ""})
-        else if (c = ".")
-            runs.Push({s: i - 1, e: i, fg: PC_DOT, bg: ""})
+
+        ; --- the small fry ---------------------------------------------------
+        if (c = "|") {
+            runs.Push({s: i - 1, e: i, fg: PC_ALT, bg: "", st: ""})
+            lastAtom := false
+        } else if (c = "^" || c = "$") {
+            runs.Push({s: i - 1, e: i, fg: PC_ANCHOR, bg: "", st: ""})
+            lastAtom := true
+        } else if (c = ".") {
+            runs.Push({s: i - 1, e: i, fg: PC_DOT, bg: "", st: ""})
+            lastAtom := true
+        } else if (c = "]" || c = "}" || c = "{") {
+            ; Legal, and literal.  See the note at the top of this function.
+            runs.Push({s: i - 1, e: i, fg: PC_LITERAL, bg: "", st: ""})
+            lastAtom := true
+        } else {
+            lastAtom := true
+        }
         i++
     }
-    ; Anything still on the stack never got closed.  These are pushed last so
-    ; they paint over the depth colour already applied to them.
+
+    ; --- "(" that never closed.  Pushed after the loop so they paint over the
+    ; --- depth Color the opener already got.
     for openPos in openStack
-        runs.Push({s: openPos, e: openPos + 1, fg: PC_BAD_FG, bg: PC_BAD_BG})
-    return runs
+        runs.Push({s: openPos, e: openPos + 1, fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+
+    ; --- references to groups that do not exist ---------------------------
+    ; Checked at the end rather than in line, because PCRE allows a forward
+    ; reference: \2 may legitimately appear before group 2 is defined.
+    for br in backrefs {
+        if (br.ref ~= "^\d+$") {
+            v := Integer(br.ref)
+            if (v > 0 && v <= capCount)
+                continue                       ; a real backreference
+            ; A SINGLE digit is always a backreference to PCRE, so \3 with two
+            ; groups is a hard error.  Two or more digits fall back to being an
+            ; octal code point when the number is too big to be a group and the
+            ; digits allow it -- \12 in a pattern with no groups is chr(0o12).
+            if (StrLen(br.ref) > 1 && br.ref ~= "^[0-7]+$") {
+                runs.Push({s: br.s, e: br.e, fg: PC_ESCNUM, bg: "", st: ""})
+                continue
+            }
+            runs.Push({s: br.s, e: br.e, fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+            continue
+        }
+        if (br.ref ~= "^[+-]")                 ; relative: not worth resolving
+            continue
+        if (!names.Has(br.ref))
+            runs.Push({s: br.s, e: br.e, fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+    }
+
+    ; --- two subpatterns with the same name -------------------------------
+    ; PCRE refuses this outright unless DUPNAMES is on, which is the J option.
+    ; Worth having: the big HotstringHelper pattern defines (?<Repl>...) twice
+    ; and simply will not compile with J unticked, which is a much better
+    ; thing to see under the name than to read in the status bar.
+    if (!jMode) {
+        for d in nameDefs
+            if (names[d.name] > 1)
+                runs.Push({s: d.s, e: d.e, fg: PC_BAD_FG, bg: PC_BAD_BG, st: "B"})
+    }
+
+    PushPlaceholders(pat, runs, phMap?)
+    return {runs: runs, pairs: pairs, parenFg: parenFg}
+}
+
+ParenColor(depth) => PC_PAREN[Mod(depth, PC_PAREN.Length) + 1]
+
+EscColor(kind) {
+    switch kind {
+        case "assert":  return PC_ANCHOR       ; \b \A \z -- a position, like ^
+        case "class":   return PC_ESC          ; \d \w \p{L} -- a character
+        case "num":     return PC_ESCNUM       ; \x41 \t -- a specific code point
+        case "lit":     return PC_ESCLIT       ; \. \( -- just that character
+        case "backref": return PC_BACKREF
+        case "bad":     return PC_BAD_FG
+    }
+    return PC_ESC
+}
+
+; %name% is painted LAST, over whatever else laid claim to those characters,
+; and it scans the whole pattern with the identical regex ExpandText() uses.
+;
+; That is the point of doing it this way.  The old tokenizer handled "%" inline
+; and swallowed a character class in one bite, so [%vowels%] got no placeholder
+; Color -- while ExpandText(), which just scans the raw string, substituted it
+; regardless.  Highlighting and expansion disagreed.  Now they cannot: the same
+; expression at the same offsets decides both, so what is tinted is exactly
+; what gets swapped in, inside classes and (?#comments) included.
+PushPlaceholders(pat, runs, phMap?) {
+    if (!IsSet(phMap)) {
+        if (!PhOn())
+            return
+        phMap := RT.PhMap
+    }
+    pos := 1
+    while (fp := RegExMatch(pat, "%([A-Za-z_]\w*)%", &pm, pos)) {
+        known := phMap.Has(pm[1])
+        runs.Push({s: fp - 1, e: fp - 1 + pm.Len,
+                   fg: known ? PC_PH_FG : PC_BADPH_FG,
+                   bg: known ? PC_PH_BG : PC_BADPH_BG, st: "N"})
+        pos := fp + pm.Len
+    }
+}
+
+; Classifies the escape starting at the backslash at 1-based position i.
+; Returns {len, kind, ref}; 'ref' is filled in only for backreferences.
+;   assert   \b \B \A \Z \z \G \K              a position
+;   class    \d \w \s \h \v \R \N \X \C \p{}   a character
+;   num      \x41 \x{263A} \o{17} \cA \012 \t  a specific code point
+;   lit      \. \( \\                          a metacharacter made ordinary
+;   backref  \1 \g{2} \k<name>                 a reference
+;   quote    \Q          endq  \E
+;   bad      PCRE will not compile this
+;
+; The 'inClass' flag is not a detail: inside a character class \b means
+; backspace rather than word boundary, and \A \z \R \X \C \N and the
+; backreference forms are outright errors.  Getting that wrong in either
+; direction produces a red mark on a working pattern.
+ScanEscape(pat, i, n, inClass) {
+    static valid := "ABCDEGHKNPQRSVWXZabcdefghknoprstvwxz"
+    if (i >= n)                                ; trailing lone backslash
+        return {len: 1, kind: "bad", ref: ""}
+    c := SubStr(pat, i + 1, 1)
+
+    if (c = "Q")
+        return {len: 2, kind: "quote", ref: ""}
+    if (c = "E")
+        return {len: 2, kind: "endq", ref: ""}
+
+    ; --- \x41  \x{263A} ---------------------------------------------------
+    if (c = "x") {
+        if (SubStr(pat, i + 2, 1) = "{") {
+            cl := InStr(pat, "}", , i + 2)
+            if (!cl)
+                return {len: 2, kind: "bad", ref: ""}
+            return {len: cl - i + 1, kind: "num", ref: ""}
+        }
+        RegExMatch(pat, "A)\\x[0-9A-Fa-f]{0,2}", &m, i)   ; bare \x is a valid NUL
+        return {len: m.Len, kind: "num", ref: ""}
+    }
+
+    ; --- \o{17} -----------------------------------------------------------
+    if (c = "o") {
+        if (SubStr(pat, i + 2, 1) != "{")
+            return {len: 2, kind: "bad", ref: ""}
+        cl := InStr(pat, "}", , i + 2)
+        if (!cl)
+            return {len: 2, kind: "bad", ref: ""}
+        return {len: cl - i + 1, kind: "num", ref: ""}
+    }
+
+    ; --- \cA --------------------------------------------------------------
+    if (c = "c") {
+        if (i + 2 > n)
+            return {len: 2, kind: "bad", ref: ""}
+        return {len: 3, kind: "num", ref: ""}
+    }
+
+    ; --- \p{L}  \P{^Lu}  \pL ----------------------------------------------
+    if (c = "p" || c = "P") {
+        if (SubStr(pat, i + 2, 1) = "{") {
+            cl := InStr(pat, "}", , i + 2)
+            if (!cl)
+                return {len: 2, kind: "bad", ref: ""}
+            return {len: cl - i + 1, kind: "class", ref: ""}
+        }
+        if RegExMatch(pat, "A)\\[pP][A-Za-z]", &m, i)
+            return {len: 3, kind: "class", ref: ""}
+        return {len: 2, kind: "bad", ref: ""}
+    }
+
+    ; --- digits: octal, or a backreference --------------------------------
+    ; Whether \12 is group 12 or the character 0o12 depends on how many groups
+    ; the pattern actually has, which is not known yet.  All the digits are
+    ; taken here and the decision is deferred to the end of AnalyzePattern().
+    if (InStr("0123456789", c, true)) {
+        RegExMatch(pat, "A)\\\d+", &m, i)
+        digits := SubStr(m[0], 2)
+        if (c = "0" || inClass)                ; unambiguously octal in both cases
+            return {len: m.Len, kind: (digits ~= "^[0-7]+$") ? "num" : "bad", ref: ""}
+        return {len: m.Len, kind: "backref", ref: digits}
+    }
+
+    ; --- \g1  \g{2}  \g{-1}  \g<name>  \k<name>  \k{name} -----------------
+    if (c = "g" || c = "k") {
+        if (inClass)
+            return {len: 2, kind: "bad", ref: ""}
+        if RegExMatch(pat, "A)\\[gk](\{[+-]?\w+\}|<[+-]?\w+>|'[+-]?\w+'|[+-]?\d+)", &m, i)
+            return {len: m.Len, kind: "backref", ref: Trim(m[1], "{}<>'")}
+        return {len: 2, kind: "bad", ref: ""}
+    }
+
+    ; --- position assertions ----------------------------------------------
+    if (!inClass && InStr("bBAZzGK", c, true))
+        return {len: 2, kind: "assert", ref: ""}
+    if (inClass && c = "b")                    ; inside a class, \b is backspace
+        return {len: 2, kind: "num", ref: ""}
+
+    ; --- escapes that match a character -----------------------------------
+    if (InStr("dDwWsShHvV", c, true))
+        return {len: 2, kind: "class", ref: ""}
+    if (!inClass && InStr("RNXC", c, true))
+        return {len: 2, kind: "class", ref: ""}
+
+    ; --- control characters written by name -------------------------------
+    if (InStr("nrtfae", c, true))
+        return {len: 2, kind: "num", ref: ""}
+
+    ; --- escaping a non-alphanumeric is always legal and always literal ----
+    if !(c ~= "[A-Za-z0-9]")
+        return {len: 2, kind: "lit", ref: ""}
+
+    ; --- a letter with no meaning: PCRE says "unrecognized character follows \"
+    if (inClass)
+        return {len: 2, kind: "bad", ref: ""}
+    return {len: 2, kind: InStr(valid, c, true) ? "class" : "bad", ref: ""}
+}
+
+; Walks the character class beginning at the "[" at 1-based position i, pushing
+; its runs.  Returns the 1-based position just past the closing "]", or 0 if it
+; is never closed -- which, unlike a stray "]", really is a compile error.
+;
+; The class gets a pale background across its whole span and then has its
+; contents painted on top, so it still reads as one object while \d, [:alpha:]
+; and the range hyphens keep the same Colors they have everywhere else.
+ScanClass(pat, i, n, runs) {
+    static posix := "alpha,alnum,ascii,blank,cntrl,digit,graph,lower,print,"
+                  . "punct,space,upper,word,xdigit"
+    j := i + 1
+    neg := (SubStr(pat, j, 1) = "^")
+    if (neg)
+        j++
+
+    ; Find the closing bracket first, so an unterminated class can be marked in
+    ; one piece.  A "]" in the very first position is a member, not the end.
+    k := j
+    if (SubStr(pat, k, 1) = "]")
+        k++
+    while (k <= n) {
+        ch := SubStr(pat, k, 1)
+        if (ch = "\") {
+            k += 2
+            continue
+        }
+        if (ch = "[" && SubStr(pat, k + 1, 1) = ":") {
+            if (cl := InStr(pat, ":]", , k + 2)) {
+                k := cl + 2
+                continue
+            }
+        }
+        if (ch = "]")
+            break
+        k++
+    }
+    if (k > n) {
+        runs.Push({s: i - 1, e: n, fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+        return 0
+    }
+
+    runs.Push({s: i - 1, e: k,     fg: "",       bg: PC_CLASS_BG, st: ""})
+    runs.Push({s: i - 1, e: i,     fg: PC_CLASS, bg: "", st: ""})      ; [
+    if (neg)
+        runs.Push({s: i, e: i + 1, fg: PC_CLASS, bg: "", st: ""})      ; ^
+    runs.Push({s: k - 1, e: k,     fg: PC_CLASS, bg: "", st: ""})      ; ]
+
+    p := j
+    prevLit := ""            ; code point of the previous single-character member
+    prevEnd := 0             ; and where it ended, so "-" can tell range from dash
+    if (SubStr(pat, p, 1) = "]") {                    ; the leading literal "]"
+        runs.Push({s: p - 1, e: p, fg: PC_LITERAL, bg: "", st: ""})
+        prevLit := Ord("]"), prevEnd := p
+        p++
+    }
+    while (p < k) {
+        ch := SubStr(pat, p, 1)
+
+        if (ch = "\") {
+            es  := ScanEscape(pat, p, n, true)
+            bad := (es.kind = "bad")
+            runs.Push({s: p - 1, e: p - 1 + es.len,
+                       fg: bad ? PC_BAD_FG : EscColor(es.kind),
+                       bg: bad ? PC_BAD_BG : "", st: ""})
+            prevLit := "", prevEnd := p - 1 + es.len
+            p += es.len
+            continue
+        }
+
+        if (ch = "[" && SubStr(pat, p + 1, 1) = ":") {
+            cl := InStr(pat, ":]", , p + 2)
+            if (cl && cl < k) {
+                nm := LTrim(SubStr(pat, p + 2, cl - p - 2), "^")
+                ok := InStr("," posix ",", "," nm ",", true)
+                runs.Push({s: p - 1, e: cl + 1,
+                           fg: ok ? PC_POSIX : PC_BAD_FG,
+                           bg: ok ? "" : PC_BAD_BG, st: ""})
+                prevLit := "", prevEnd := cl + 1
+                p := cl + 2
+                continue
+            }
+        }
+
+        ; A "-" is a range operator only between two members.  First or last in
+        ; the class it is an ordinary hyphen, and so is the one in [a-z-x],
+        ; which is why prevEnd is cleared after a range rather than moved on.
+        if (ch = "-" && prevEnd = p - 1 && p + 1 < k) {
+            hiPos := p + 1, hiLen := 1, hiOrd := "", hiFg := ""
+            hc := SubStr(pat, hiPos, 1)
+            if (hc = "\") {
+                es := ScanEscape(pat, hiPos, n, true)
+                hiLen := es.len
+                hiFg  := (es.kind = "bad") ? PC_BAD_FG : EscColor(es.kind)
+            } else {
+                hiOrd := Ord(hc)
+            }
+            bad := (prevLit != "" && hiOrd != "" && hiOrd < prevLit)   ; [z-a]
+            runs.Push({s: p - 1, e: p, fg: bad ? PC_BAD_FG : PC_RANGE,
+                       bg: bad ? PC_BAD_BG : "", st: ""})
+            if (bad)
+                runs.Push({s: hiPos - 1, e: hiPos - 1 + hiLen,
+                           fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
+            else if (hiFg != "")
+                runs.Push({s: hiPos - 1, e: hiPos - 1 + hiLen,
+                           fg: hiFg, bg: "", st: ""})
+            prevLit := "", prevEnd := 0
+            p := hiPos + hiLen
+            continue
+        }
+        if (ch = "-")
+            runs.Push({s: p - 1, e: p, fg: PC_LITERAL, bg: "", st: ""})
+
+        prevLit := (ch = "-") ? "" : Ord(ch)
+        prevEnd := p
+        p++
+    }
+    return k + 1
 }
 
 ApplyPatternColors(*) {
     SetTimer(ApplyPatternColors, 0)
     if (!RT.rePattern)
         return
-    ; Recolouring has to save and restore the selection, and doing that in the
+    ; ReColoring has to save and restore the selection, and doing that in the
     ; middle of a click-drag cancels the drag.  Wait until the button is up.
     if (GetKeyState("LButton", "P")) {
         SetTimer(ApplyPatternColors, -COLOR_DELAY)
@@ -1699,98 +2263,371 @@ ApplyPatternColors(*) {
     pat := PatternText()
     RT.LastPatText := pat
 
+    info := AnalyzePattern(pat)
+
     RT.PatShading := true
     sel := RE.GetSel()
     scr := RE.GetScrollPos()
     DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 0, "Ptr", 0)
 
     RE.SetSel(0, -1)
-    RE.SetFont({Color: "Auto", BkColor: "Auto"})
+    RE.SetFont({Style: "N", Color: "Auto", BkColor: "Auto"})
 
-    for r in TokenizePattern(pat) {
-        RE.SetSel(r.s, r.e)
-        RE.SetFont(r.bg = "" ? {Color: r.fg} : {Color: r.fg, BkColor: r.bg})
-    }
+    ApplyRuns(RE, info.runs)
 
     RE.SetSel(sel.S, sel.E)
     RE.SetScrollPos(scr.X, scr.Y)
     DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 1, "Ptr", 0)
     DllCall("InvalidateRect", "Ptr", RE.Hwnd, "Ptr", 0, "Int", 1)
     RT.PatShading := false
+
+    ; The wholesale repaint above wiped any pair highlight, so drop the record
+    ; of it and let the caret's current position put one back.
+    RT.PatPairs   := info.pairs
+    RT.PatParenFg := info.parenFg
+    RT.PatHL      := ""
+    UpdateParenMatch()
 }
 
-; ============================== PATTERN HISTORY ===========================
-; History is deliberate, not inferred: nothing is recorded unless you press
-; "Add to History".  The pattern you are currently working on is saved with
-; the session separately, so it survives a restart whether or not you bank it.
-AddCurrentToHistory() {
+; ---------------------- MATCHING PAREN HIGHLIGHT --------------------------
+; With the caret beside a structural "(" or ")", that bracket and its partner
+; both get a background block, so the extent of a group is readable at a glance
+; even in a 200-character pattern.
+;
+; "Structural" is the whole trick.  The pairing is whatever AnalyzePattern()
+; worked out, so an escaped \( , a "(" sitting inside a character class, and
+; the "(" of a (?i) option set -- which opens nothing -- are all correctly
+; passed over.  A naive bracket-counting scan gets every one of those wrong,
+; which is why this is worth deriving from the parse rather than doing on the
+; raw text.
+;
+; Only two characters are repainted, never the whole box: a full reColor on
+; every caret movement would be visible as a flicker.  The Color to put back
+; comes from RT.PatParenFg, recorded during the same pass that did the pairing,
+; which is also why RT.PatPairs is cleared the moment the text changes -- a
+; stale map would happily highlight the wrong two characters during the
+; COLOR_DELAY window before the reColor catches up.
+UpdateParenMatch(*) {
+    SetTimer(UpdateParenMatch, 0)
+    if (!RT.rePattern || RT.PatShading || RT.ParenBusy)
+        return
+    if (!IsObject(RT.PatPairs))                ; no parse yet, or text just changed
+        return
+    RE := RT.rePattern
+    if (GetKeyState("LButton", "P")) {         ; same click-drag hazard as above
+        SetTimer(UpdateParenMatch, -80)
+        return
+    }
+
+    sel  := RE.GetSel()
+    want := ""
+    if (sel.S = sel.E) {                       ; a selection, not a caret: no pair
+        if (RT.PatPairs.Has(sel.S - 1))        ; prefer the bracket just behind
+            want := sel.S - 1
+        else if (RT.PatPairs.Has(sel.S))
+            want := sel.S
+    }
+    if (want = "") {
+        if (!IsObject(RT.PatHL))
+            return                             ; nothing lit, nothing to light
+    } else if (IsObject(RT.PatHL) && (RT.PatHL[1] = want || RT.PatHL[2] = want))
+        return                                 ; already showing this very pair
+
+    RT.ParenBusy := true
+    scr := RE.GetScrollPos()
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 0, "Ptr", 0)
+
+    if (IsObject(RT.PatHL)) {
+        for p in RT.PatHL
+            PaintParenAt(RE, p, RT.PatParenFg.Has(p) ? RT.PatParenFg[p] : "Auto",
+                         "Auto", "N")
+        RT.PatHL := ""
+    }
+    if (want != "") {
+        q := RT.PatPairs[want]
+        for p in [want, q]
+            PaintParenAt(RE, p, RT.PatParenFg.Has(p) ? RT.PatParenFg[p] : "Auto",
+                         PC_PARMATCH_BG, "B")
+        RT.PatHL := [want, q]
+    }
+
+    RE.SetSel(sel.S, sel.E)
+    RE.SetScrollPos(scr.X, scr.Y)
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 1, "Ptr", 0)
+    DllCall("InvalidateRect", "Ptr", RE.Hwnd, "Ptr", 0, "Int", 1)
+    RT.ParenBusy := false
+}
+
+; Runs are applied in the order they were pushed, and later ones deliberately
+; overpaint earlier ones -- that is how the class tint ends up underneath its
+; own contents, and how %placeholders% win over everything.  A run only sets the
+; attributes it actually names, so overpainting a Color does not disturb a
+; background laid down earlier.
+;
+; 'off' shifts every run along by a fixed number of characters, which is what
+; lets the Color Key window paste a specimen into the middle of a much longer
+; block of text and still Color it with the real tokenizer.
+ApplyRuns(RE, runs, off := 0) {
+    for r in runs {
+        RE.SetSel(off + r.s, off + r.e)
+        f := {}
+        if (r.fg != "")
+            f.Color := r.fg
+        if (r.bg != "")
+            f.BkColor := r.bg
+        if (r.st != "")
+            f.Style := r.st
+        if ObjOwnPropCount(f)
+            RE.SetFont(f)
+    }
+}
+
+PaintParenAt(RE, pos, fg, bg, st) {
+    RE.SetSel(pos, pos + 1)
+    RE.SetFont({Color: fg, BkColor: bg, Style: st})
+}
+
+; ============================== Color KEY =================================
+; A legend for the pattern box, in a window of its own.
+;
+; The Cheat Sheet tab is a plain Edit control, so it can only ever DESCRIBE the
+; Colors in words -- and "royal blue means a reference to a group" is no use
+; whatever to someone who cannot see royal blue.  Hence a second window with a
+; rich edit in it, showing each rule rendered exactly as the pattern box would
+; render it.
+;
+; The important part is that nothing here is hand-Colored.  Each row carries a
+; specimen pattern, that specimen is put through the real AnalyzePattern(), and
+; the runs it returns are pasted in at the specimen's offset by ApplyRuns().
+; The legend is therefore generated BY the highlighter rather than written to
+; describe it, and the two cannot drift apart: change a Color or a rule and
+; this window follows on its own.  A row that stops looking right here is a
+; genuine bug in the tokenizer, not a stale piece of documentation.
+;
+; That is also why AnalyzePattern() takes the x, J and placeholder overrides.
+; Several rows only demonstrate anything under a particular setting -- the
+; discarded-whitespace row needs x on, the duplicate-name row needs J off --
+; and the legend has to look the same whatever the option boxes happen to say.
+ColorKeyRows() {
+    ; {h: heading}  |  {d: ""} blank spacer  |  {p: specimen, d: what it shows}
+    ; x, j and ph are per-row overrides handed straight to AnalyzePattern.
+    return [
+      {h: "STRUCTURE"},
+      {p: "(cat(dog(bird)))",     d: "nesting depth, cycling through three Colors"},
+      {p: "(?:x) (?>x) (?|x)",    d: "non-capturing, atomic, branch reset"},
+      {p: "(?<year>\d{4})",       d: "a named group; the name itself is picked out"},
+      {p: "(?i) (?-x) (*SKIP)",   d: "directives that change how the rest is read"},
+      {p: "(?#a note)",           d: "a comment inside the pattern"},
+      {d: ""},
+      {h: "MATCHING A POSITION, CONSUMING NOTHING"},
+      {p: "^ $ \b \B \A \Z \z \G \K",   d: "anchors and boundaries"},
+      {p: "(?=x) (?!x) (?<=x) (?<!x)",  d: "lookaround: same green, same idea"},
+      {d: ""},
+      {h: "MATCHING A CHARACTER"},
+      {p: "\d \w \s \h \v \R \N \p{L}", d: "one character of a kind"},
+      {p: "\t \n \x41 \x{263A} \cA",    d: "one specific code point"},
+      {p: "\. \( \\ \+",                d: "a metacharacter made ordinary"},
+      {p: ".",                          d: "any character except a line break"},
+      {d: ""},
+      {h: "CHARACTER CLASSES, TINTED ACROSS THE WHOLE [...]"},
+      {p: "[a-z0-9_]",            d: "a range, and ordinary members"},
+      {p: "[^\d[:punct:]]",       d: "negation and POSIX names; escapes keep theirs"},
+      {d: ""},
+      {h: "REPETITION AND CHOICE"},
+      {p: "a* b+ c? d{2,5}",      d: "greedy quantifiers"},
+      {p: "a*? b++ c{2,5}?",      d: "the ? or + that makes one lazy or possessive"},
+      {p: "cat|dog",              d: "alternation"},
+      {d: ""},
+      {h: "REFERRING BACK TO A GROUP"},
+      {p: "(a)\1 (?<n>x)\k<n> (?&n)",   d: "backreferences and subroutine calls"},
+      {d: ""},
+      {h: "LOOKS SPECIAL, ISN'T"},
+      {p: "a] b} c{d",            d: "PCRE reads all three as ordinary characters"},
+      {p: "a b # note", x: 1,     d: "with x ticked, discarded space and a comment"},
+      {d: ""},
+      {h: "PLACEHOLDERS, THIS TESTER ONLY"},
+      {p: "%reMonth%", ph: Map("reMonth", 1), d: "resolves to a row in the table above"},
+      {p: "%reMnoth%", ph: Map("reMonth", 1), d: "does not; it is matched as literal text"},
+      {d: ""},
+      {h: "WILL NOT COMPILE, AND ONLY EVER THIS"},
+      {p: "(a",                   d: "a ( with no ), or a ) with no ("},
+      {p: "[abc",                 d: "a character class that is never closed"},
+      {p: "\q",                   d: "a backslash-letter with no meaning"},
+      {p: "*a",                   d: "a quantifier with nothing to repeat"},
+      {p: "[z-a]",                d: "a range whose ends are the wrong way round"},
+      {p: "(?<n>a)(?<n>b)",       d: "two groups sharing a name, with J unticked"},
+      {p: "(a)\3",                d: "a reference to a group that does not exist"}
+    ]
+}
+
+ShowColorKey(*) {
+    static COL := 32                 ; column the descriptions start in
+    static DESC_FG := 0x606060       ; muted, so the specimens are what you read
+    static SPACES := "                                                  "
+
+    if (RT.keyGui) {                 ; already built: just bring it back
+        RT.keyGui.Show()
+        return
+    }
+
+    ; --- lay the text out first, remembering where each specimen landed ---
+    rows := ColorKeyRows()
+    txt := "", specimens := [], heads := []
+    for r in rows {
+        if (!r.HasOwnProp("p")) {
+            if (r.HasOwnProp("h"))
+                heads.Push({off: StrLen(txt), len: StrLen(r.h)}), txt .= r.h
+            txt .= "`n"
+            continue
+        }
+        specimens.Push({off: StrLen(txt), row: r})
+        txt .= r.p SubStr(SPACES, 1, Max(2, COL - StrLen(r.p))) r.d "`n"
+    }
+
+    g := Gui("+Resize +MinSize520x260", "Pattern Box Color Key")
+    g.MarginX := 10, g.MarginY := 10
+    g.BackColor := "FFFFFF"
+
+    ; Sized from the content that is actually there rather than from a guess,
+    ; then clamped so the window can never open taller than the screen.
+    maxLen := 0
+    for line in StrSplit(txt, "`n")
+        maxLen := Max(maxLen, StrLen(line))
+    wantW := Integer((maxLen + 3) * SUBJ_SIZE * 0.80)
+    wantH := Min(A_ScreenHeight - 200,
+                 Integer(StrSplit(txt, "`n").Length * SUBJ_SIZE * 1.7) + 30)
+
+    RE := RichEdit(g, "x10 y10 w" wantW " h" wantH)
+    RE.SetDefaultFont({Name: SUBJ_FONT, Size: SUBJ_SIZE})
+    RE.WordWrap(false)               ; a wrapped specimen would be unreadable
+    RE.SetText(txt)
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x00CF, "Ptr", 1, "Ptr", 0) ; EM_SETREADONLY
+    RT.keyRE := RE
+
+    FontUI(g)
+    btn := g.Add("Button", "x10 y" (wantH + 18) " w90 h24 Default", "Close")
+    btn.OnEvent("Click", (*) => RT.keyGui.Hide())
+    RT.keyBtn := btn
+
+    g.OnEvent("Close", (*) => RT.keyGui.Hide())
+    g.OnEvent("Escape", (*) => RT.keyGui.Hide())
+    g.OnEvent("Size", OnSizeKeyGui)
+
+    ; --- three passes, coarse to fine ---------------------------------------
+    ; Everything goes grey, then each specimen is reset to the pattern box's own
+    ; default, then the tokenizer's runs go on top.  Painting the reset first is
+    ; what keeps a specimen's ordinary literal characters black instead of
+    ; leaving them in the description Color.
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 0, "Ptr", 0)
+    RE.SetSel(0, -1)
+    RE.SetFont({Style: "N", Color: DESC_FG, BkColor: "Auto"})
+    for h in heads {
+        RE.SetSel(h.off, h.off + h.len)
+        RE.SetFont({Style: "B", Color: 0x202020})
+    }
+    for sp in specimens {
+        r := sp.row
+        RE.SetSel(sp.off, sp.off + StrLen(r.p))
+        RE.SetFont({Style: "N", Color: "Auto"})
+        info := AnalyzePattern(r.p,
+                               r.HasOwnProp("x")  ? r.x  : 0,
+                               r.HasOwnProp("j")  ? r.j  : 0,
+                               r.HasOwnProp("ph") ? r.ph : Map())
+        ApplyRuns(RE, info.runs, sp.off)
+    }
+    RE.SetSel(0, 0)
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 1, "Ptr", 0)
+    DllCall("InvalidateRect", "Ptr", RE.Hwnd, "Ptr", 0, "Int", 1)
+
+    ; Published only now that it is fully built, so a failure part way through
+    ; cannot leave the early-return above handing back a half-made window.
+    RT.keyGui := g
+    g.Show("AutoSize")
+}
+
+OnSizeKeyGui(guiObj, MinMax, W, H) {
+    if (MinMax = -1 || !RT.keyRE)
+        return
+    RT.keyRE.Move(10, 10, W - 20, H - 54)
+    RT.keyBtn.Move(10, H - 34, 90, 24)
+}
+
+; ============================== SNIPPETS ==================================
+; Called snippets rather than history because nothing lands here on its own:
+; a pattern is banked only when you press "Add Snippet".  A history that has
+; to be filled in by hand is not a history, and the old name kept promising a
+; record of what had been tried, which this list has never been.
+;
+; The pattern you are currently working on is saved with the session quite
+; separately, so it survives a restart whether or not you ever bank it.
+AddCurrentSnippet() {
     pat := PatternText()
     if (pat = "") {
         Status("Nothing to add — the pattern box is empty.")
         return
     }
-    if (AddHistory(pat))
-        Status("Added to history (" RT.History.Length " of " MAX_HISTORY ").")
+    if (AddSnippet(pat))
+        Status("Added as snippet " RT.Snippets.Length " of " MAX_SNIPPETS ".")
     else
-        Status("That pattern was already in the history; moved it to the top.")
+        Status("That pattern was already saved; moved it to the top.")
     RT.rePattern.Focus()
 }
 
 ; Returns true when the pattern was new, false when it was already present.
-AddHistory(pat) {
+AddSnippet(pat) {
     if (pat = "")
         return false
-    for i, h in RT.History {
+    for i, h in RT.Snippets {
         if (h == pat) {                            ; already known -> promote it
-            RT.History.RemoveAt(i)
-            RT.History.InsertAt(1, pat)
+            RT.Snippets.RemoveAt(i)
+            RT.Snippets.InsertAt(1, pat)
             return false
         }
     }
-    RT.History.InsertAt(1, pat)
-    while (RT.History.Length > MAX_HISTORY)
-        RT.History.Pop()
+    RT.Snippets.InsertAt(1, pat)
+    while (RT.Snippets.Length > MAX_SNIPPETS)
+        RT.Snippets.Pop()
     return true
 }
 
-ShowHistoryMenu() {
+ShowSnippetMenu() {
     mh := Menu()
-    if (!RT.History.Length) {
-        mh.Add("(nothing saved yet — use Add to History)", (*) => 0)
-        mh.Disable("(nothing saved yet — use Add to History)")
+    if (!RT.Snippets.Length) {
+        mh.Add("(nothing saved yet — use Add Snippet)", (*) => 0)
+        mh.Disable("(nothing saved yet — use Add Snippet)")
     } else {
-        for i, h in RT.History {
+        for i, h in RT.Snippets {
             label := OneLine(h)
             if (StrLen(label) > 88)
                 label := SubStr(label, 1, 88) Chr(0x2026)
             ; & is the menu accelerator marker, and the index keeps every
             ; label unique even when two entries truncate to the same text.
-            mh.Add(i ".  " StrReplace(label, "&", "&&"), HistoryPick.Bind(i))
+            mh.Add(i ".  " StrReplace(label, "&", "&&"), SnippetPick.Bind(i))
         }
         mh.Add()
-        mh.Add("Remove the entry I pick next", (*) => (RT.HistDelete := true, ShowHistoryMenu()))
-        mh.Add("Clear history", (*) => ClearHistory())
+        mh.Add("Remove the entry I pick next", (*) => (RT.SnipDelete := true, ShowSnippetMenu()))
+        mh.Add("Clear all snippets", (*) => ClearSnippets())
     }
     mh.Show()
 }
 
-HistoryPick(idx, *) {
-    if (idx > RT.History.Length)
+SnippetPick(idx, *) {
+    if (idx > RT.Snippets.Length)
         return
-    if (RT.HistDelete) {
-        RT.HistDelete := false
-        RT.History.RemoveAt(idx)
-        Status("Removed that entry from the history.")
+    if (RT.SnipDelete) {
+        RT.SnipDelete := false
+        RT.Snippets.RemoveAt(idx)
+        Status("Removed that snippet.")
         return
     }
-    SetPatternText(RT.History[idx])
+    SetPatternText(RT.Snippets[idx])
     RunTest()
     RT.rePattern.Focus()
 }
 
-ClearHistory() {
-    RT.History := []
-    Status("Pattern history cleared.")
+ClearSnippets() {
+    RT.Snippets := []
+    Status("All snippets cleared.")
 }
 
 ; ============================== EXPANSION =================================
@@ -2079,7 +2916,7 @@ ScheduleRun() {
 }
 
 SubjectChanged() {
-    if (RT.Shading)                      ; our own recolouring, not a real edit
+    if (RT.Shading)                      ; our own reColoring, not a real edit
         return
     if (CanonText() == RT.Raw)           ; formatting-only notification
         return
@@ -2725,7 +3562,7 @@ SaveSession(announce := false, path := "") {
     txt .= "PAT=" Enc(PatternText()) "`r`n"
     txt .= "REPL=" Enc(RT.edRepl.Value) "`r`n"
     txt .= "SUBJ=" Enc(CanonText()) "`r`n"
-    for h in RT.History
+    for h in RT.Snippets
         txt .= "HIST=" Enc(h) "`r`n"
     try {
         if FileExist(path)
@@ -2774,7 +3611,7 @@ LoadSession(path := "") {
     UpdateTitle()
     RT.Loading := true
     RT.PhNames := [], RT.PhMap := Map(), RT.CurPh := 0
-    RT.History := []
+    RT.Snippets := []
     optStr := "", mode := "match", subj := ""
     Loop Parse txt, "`n", "`r" {
         line := A_LoopField
@@ -2797,7 +3634,7 @@ LoadSession(path := "") {
             case "PAT":     SetPatternText(Dec(val))
             case "REPL":    RT.edRepl.Value := Dec(val)
             case "SUBJ":    subj := Dec(val)
-            case "HIST":    RT.History.Push(Dec(val))
+            case "HIST":    RT.Snippets.Push(Dec(val))
             case "PH":
                 if (t := InStr(val, "`t")) {
                     nm := SubStr(val, 1, t - 1)
@@ -3050,26 +3887,51 @@ PLACEHOLDERS  (this tester only)
   The Hits column counts that placeholder's own matches in the haystack.
   The AHK Code tab turns the references back into concatenated variables.
 
-PATTERN BOX COLOURS
-  A %name% on a pale blue background resolves to a placeholder in the table.
-  A %name% on a pink background does NOT — usually a typo in the name, and it
-  will be matched as literal text rather than expanded.
-  White on red marks an unbalanced ( or ), an unclosed [ , or a trailing \.
-  Nested groups cycle through three colours by depth, which makes the shape of
-  a long alternation much easier to read.
-  Escapes, character classes, quantifiers, | and anchors each get their own
-  colour.  Set PAT_FULL_SYNTAX := false near the top of the script to colour
-  only the placeholders and leave everything else black.
+PATTERN BOX ColorS
+  Press "Color Key" above the pattern box for the legend itself — every rule
+  shown in the Color it actually produces, which is not something this tab can
+  do, being plain black text.  What follows is only what the Colors MEAN.
 
-PATTERN HISTORY
-  Nothing is recorded automatically.  Press "Add to History" to bank the
-  pattern currently in the box; the History button lists what you have saved,
-  newest first, and picking one loads it.  Adding a pattern that is already
-  saved just moves it back to the top rather than duplicating it.
-  The history menu also offers "Remove the entry I pick next" and
-  "Clear history".  History is stored in the session file.
+  The palette is grouped by what things DO, so that things behaving alike look
+  alike: green asserts a position and consumes nothing (^ $ \b \A, and the
+  ?= ?! ?<= ?<! of a lookaround); teal matches a character; blue is repetition;
+  orange is a character class; and ( and ) cycle through three Colors by
+  nesting depth, which is what makes the shape of a long alternation readable.
+
+  WHITE ON RED means PCRE will refuse to compile the pattern.  It is never used
+  for anything that merely looks unusual.  It marks: an unbalanced ( or ), an
+  unclosed [ , a trailing \, a backslash-letter with no meaning (\q, \y), a
+  quantifier with nothing to repeat, a backwards range such as [z-a], an
+  unknown [:posix:] name, a reference to a group that does not exist, and two
+  named groups sharing a name while J is unticked.
+
+  Conversely ] and } and a { that is not a quantifier are NOT errors — PCRE
+  reads all three as ordinary characters — so they get a pale grey that says
+  the bracket is not doing what it looks like, and nothing stronger.
+
+  Put the caret beside any ( or ) and it lights up together with its partner,
+  which is the quickest way to find the end of a long group.  Escaped and
+  in-class brackets are skipped, because the pairing comes from the same parse
+  that does the Coloring rather than from counting brackets.
+
+  A %name% on a pale blue background resolves to a placeholder in the table; on
+  a pink background it does not, which usually means a typo in the name, and it
+  will be matched as literal text rather than expanded.  Placeholders are
+  painted over everything else, including inside character classes, because
+  that is where they are substituted too.
+
+  Set PAT_FULL_SYNTAX := false near the top of the script to Color only the
+  placeholders, leave everything else black, and switch off the paren pairing.
+
+SNIPPETS
+  Nothing is recorded automatically.  Press "Add Snippet" to bank the pattern
+  currently in the box; the Snippets button lists what you have saved, newest
+  first, and picking one loads it.  Adding a pattern that is already saved
+  just moves it back to the top rather than duplicating it.
+  The menu also offers "Remove the entry I pick next" and "Clear all
+  snippets".  Snippets are stored in the session file.
   The pattern you are working on is saved with the session independently of
-  the history, so it is still there next time whether or not you banked it.
+  the snippets, so it is still there next time whether or not you banked it.
     )"
 }
 
