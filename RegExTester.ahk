@@ -63,15 +63,15 @@ global SUBJ_SIZE    := 11
 global MAX_SHADED   := 400             ; stop shading past this many matches
 global MAX_MATCHES  := 5000            ; hard cap on the find-all loop
 global RUN_DELAY    := 300             ; ms of idle before a live re-run
-global COLOR_DELAY  := 150             ; ms of idle before reColoring the pattern
+global COLOR_DELAY  := 150             ; ms of idle before recoloring the pattern
 global MAX_SNIPPETS := 25              ; banked patterns
 global APP_TITLE    := "RegEx Tester for AHK v2"
 global TIP_WIDTH    := 560             ; px before a hover tip wraps (see
                                        ;   TipMaxWidth; both tooltip libraries
                                        ;   default to "never wrap")
 
-; --- pattern box syntax Colors -------------------------------------------
-; Set PAT_FULL_SYNTAX false to Color only the %placeholders% and leave the
+; --- pattern box syntax colors -------------------------------------------
+; Set PAT_FULL_SYNTAX false to color only the %placeholders% and leave the
 ; rest of the pattern plain black.  That also switches off the matching-paren
 ; highlight, since the pairing comes out of the same parse.
 ;
@@ -83,7 +83,8 @@ global TIP_WIDTH    := 560             ; px before a hover tip wraps (see
 ;     blue    repetition                               (* + ? {2,5})
 ;     orange  character class, plus a pale tint across the whole [...]
 ;     purple / blue / amber, cycling: nesting depth
-;     grey    punctuation that only holds a construct together
+;     gray    punctuation that only holds a construct together
+;     a pale green wash behind whatever the pattern matches literally
 ;
 ; White on red is reserved for things PCRE will REFUSE TO COMPILE, so red
 ; always means broken and never merely unusual.  Notably NOT red: a lone "]",
@@ -102,7 +103,7 @@ global PC_BACKREF  := 0x2040E0         ; \1 \k<name> (?P=name) (?&name)
 global PC_CLASS    := 0xB05000         ; the [ ^ ] of a character class
 global PC_CLASS_BG := 0xFFF2E4         ; tint across the whole class, so it reads
                                        ;   as one unit while its contents keep
-                                       ;   their own foreground Colors
+                                       ;   their own foreground colors
 global PC_RANGE    := 0xD07000         ; the - in [a-z]
 global PC_POSIX    := 0x8040A0         ; [:alpha:] and friends
 global PC_QUANT    := 0x0060C0         ; * + ? {2,5}
@@ -115,6 +116,11 @@ global PC_NONCAP   := 0x9A9AB0         ; the ?: ?> ?< > plumbing of a group
 global PC_GNAME    := 0x2050B0         ; the name itself in (?<name>...)
 global PC_COMMENT  := 0x808080         ; (?#...) and, with x, #comments
 global PC_LITERAL  := 0xA0A0A0         ; ] } and a { that is not a quantifier
+global PC_LIT_BG   := 0xEBF7E7         ; text the pattern matches literally.  A
+                                       ;   background rather than a foreground:
+                                       ;   black stays the most readable color
+                                       ;   there is, and the job here is to
+                                       ;   group the words, not to recolor them
 global PC_XWS_BG   := 0xF2F2F2         ; with x, whitespace the engine discards.
                                        ;   Whitespace has no ink to dim, so the
                                        ;   only way to show it is behind it --
@@ -636,18 +642,23 @@ class RT {
     static Subject  := ""          ; text the regex was actually run against
     static Raw      := ""          ; canonical CR-per-break copy of the haystack
     static Loading  := false       ; suppresses live re-run during bulk updates
-    static Shading  := false       ; suppresses EN_CHANGE while we reColor
+    static Shading  := false       ; suppresses EN_CHANGE while we recolor
     static PatShading := false     ; ditto, for the pattern box
-    static LastPatText := ""       ; pattern text as of the last reColor
+    static LastPatText := ""       ; pattern text as of the last recolor
 
     ; --- matching-paren highlight, all filled in by ApplyPatternColors ---
     static PatPairs   := ""        ; 0-based paren position -> its partner's
-    static PatParenFg := ""        ; 0-based paren position -> its normal Color
+    static PatParenFg := ""        ; 0-based paren position -> its normal color
     static PatHL      := ""        ; [openPos, closePos] lit right now, or ""
     static ParenBusy  := false     ; stops our own SetSel re-entering EN_SELCHANGE
 
     ; --- the Color Key window, built once and then hidden/shown ---
     static keyGui := "", keyRE := "", keyBtn := ""
+
+    ; --- the placeholder pattern box, now a rich edit like the other two ---
+    static PhShading := false      ; suppresses EN_CHANGE from our own writes
+    static LastPhPatText := ""
+    static cbTabs := "", TabsCbW := 165
     static Snippets := []          ; banked patterns, newest first
     static SnipDelete := false     ; next snippet pick removes instead of loads
     static NoJump   := false       ; suppresses caret movement on auto-selection
@@ -686,7 +697,8 @@ class RT {
 BuildGui()
 LoadSession()                  ; may overwrite RT.WinW / RT.WinH
 ApplyPhVisible()               ; before the first layout, so nothing flashes
-UpdateTitle()                  ; LoadSession bails to the demo when there is no
+ApplyTabsVisible()             ; ditto
+UpdateTitle()                  ; LoadSession bails to a demo when there is no
                                ;   file yet, so set the title unconditionally
 ; Controls are created at rough coordinates and then positioned by OnSizeGui.
 ; Running the layout once before Show() means the first paint already has
@@ -718,7 +730,13 @@ BuildGui() {
     mFile.Add()
     mFile.Add("&Import from AHK code...", (*) => ImportDialog())
     mFile.Add()
-    mFile.Add("Load &demo (OutlookMagnet)", (*) => LoadDemo())
+    ; Two demos, because they show off opposite halves of the tool: one is all
+    ; placeholders, the other is a single self-contained pattern of the sort any
+    ; other regex tester would take.
+    mDemo := Menu()
+    mDemo.Add("&Date phrases, built from placeholders  (OutlookMagnet)", (*) => LoadDemoDates())
+    mDemo.Add("&Hotstring parser, one big pattern  (AutoCorrect2)", (*) => LoadDemoHotstrings())
+    mFile.Add("Load &demo", mDemo)
     mFile.Add("&Clear everything", (*) => ClearAll())
     mFile.Add()
     mFile.Add("E&xit", (*) => OnCloseGui())
@@ -781,9 +799,19 @@ BuildGui() {
 
     FontMono(g)
     RT.edPhName := g.Add("Edit", "x10 y146 w120 h22", "")
-    RT.edPhPat  := g.Add("Edit", "x136 y146 w680 h22", "")
     RT.edPhName.OnEvent("Change", (*) => PhEdited())
-    RT.edPhPat.OnEvent("Change",  (*) => PhEdited())
+    ; A rich edit rather than a plain one, so a placeholder's pattern gets the
+    ; same coloring as the main pattern box -- these fragments are exactly where
+    ; a missed paren hides, and until now they were the one regex on screen
+    ; shown in flat black.  Two lines tall with wrap on, matching rePattern:
+    ; a one-line rich edit would need a horizontal scrollbar, and a scrollbar
+    ; inside a 22px control leaves no room for the text.
+    RT.edPhPat := RichEdit(g, "x136 y146 w680 h40")
+    RT.edPhPat.SetDefaultFont({Name: SUBJ_FONT, Size: SUBJ_SIZE})
+    RT.edPhPat.WordWrap(true)
+    HideHScroll(RT.edPhPat.Hwnd)
+    RT.edPhPat.SetEventMask(["CHANGE"])
+    RT.edPhPat.OnCommand(0x0300, (*) => PhPatChanged())          ; EN_CHANGE
 
     ; ---------- main pattern ----------
     FontUI(g)
@@ -795,7 +823,7 @@ BuildGui() {
     RT.btnSnips := g.Add("Button", "x820 y174 w96 h22", "Snippets  " Chr(0x25BE))
     RT.btnSnips.OnEvent("Click", (*) => ShowSnippetMenu())
 
-    ; Also a rich edit, so placeholders and regex syntax can be Colored.
+    ; Also a rich edit, so placeholders and regex syntax can be colored.
     RT.rePattern := RichEdit(g, "x10 y196 w900 h48")
     RT.rePattern.SetDefaultFont({Name: SUBJ_FONT, Size: SUBJ_SIZE})
     RT.rePattern.WordWrap(true)
@@ -862,6 +890,15 @@ BuildGui() {
     RT.ddlEol.OnEvent("Change", (*) => RunTest())
     RT.cbShade := g.Add("CheckBox", "x384 y382 w130 h20 Checked", "Shade matches")
     RT.cbShade.OnEvent("Click", (*) => RunTest())
+    ; Given an explicit width rather than measured like cbPh is.  cbPh can be
+    ; measured because it is the very first control on its row and everything
+    ; else keys off it; this one is pinned to the RIGHT edge, so a width that
+    ; comes back as zero puts it at innerW - 0 with nothing to draw -- present,
+    ; correct, and completely invisible.  A constant cannot fail that way.
+    ; It sits on the haystack's label row rather than over the tabs because
+    ; that is the pane it hands the space to.
+    RT.cbTabs := g.Add("CheckBox", "x520 y382 w165 h20 Checked", "Show results tabs")
+    RT.cbTabs.OnEvent("Click", (*) => ToggleTabs())
 
     ; The haystack is a rich edit control so matches can be shaded in place.
     RT.reSubject := RichEdit(g, "x10 y402 w1000 h120")
@@ -935,12 +972,12 @@ OnSizeGui(guiObj, MinMax, W, H) {
         sbH := 24                       ; not yet measurable before the first Show
 
     innerW := W - m * 2
-    phLvH := 110, patH := 48, effH := 40
+    phLvH := 110, patH := 48, effH := 40, phPatH := 40
     ; The placeholder block is optional.  Hidden, its rows cost nothing and the
     ; whole height goes to the haystack and the results tabs instead; the row 1
     ; strip holding the two checkboxes always stays.
     phShown := PhOn()
-    phBlockH := phShown ? (phLvH + sp + rowH + sp * 2) : sp
+    phBlockH := phShown ? (phLvH + sp + phPatH + sp * 2) : sp
     fixed := lblH + phBlockH
            + lblH + patH + sp + rowH + sp
            + lblH + effH + sp * 2
@@ -955,8 +992,17 @@ OnSizeGui(guiObj, MinMax, W, H) {
     phExtra := phShown ? Max(0, Integer(flex * 0.15)) : 0
     phLvH += phExtra
     spare := flex - phExtra
-    subjH := Max(60, Integer(spare / 2))
-    tabsH := Max(150, spare - subjH)
+    tabsShown := TabsOn()
+    if (tabsShown) {
+        subjH := Max(60, Integer(spare / 2))
+        tabsH := Max(150, spare - subjH)
+    } else {
+        ; The even split only makes sense while there are two panes to split
+        ; between.  With the tabs folded away the haystack takes the lot --
+        ; which is the whole reason for the toggle.
+        subjH := Max(60, spare)
+        tabsH := 0
+    }
     ; Those two minimums are wishes, not guarantees.  When the window is short
     ; they can between them ask for more height than `spare` actually is, and
     ; without this the surplus runs straight off the bottom -- the tab control
@@ -970,7 +1016,7 @@ OnSizeGui(guiObj, MinMax, W, H) {
     ; pane is recoverable by dragging the window taller; a status bar with the
     ; warnings hidden under a list view is the bug being reported.
     over := subjH + tabsH - spare
-    if (over > 0) {
+    if (over > 0 && tabsShown) {
         give := Min(over, subjH - 60)
         subjH -= give
         over -= give
@@ -996,8 +1042,8 @@ OnSizeGui(guiObj, MinMax, W, H) {
         RT.btnDn.Move(bx, y + 84, btnW, rowH)
         y += phLvH + sp
         RT.edPhName.Move(m, y, 130, rowH - 2)
-        RT.edPhPat.Move(m + 136, y, innerW - 136, rowH - 2)
-        y += rowH + sp * 2
+        RT.edPhPat.Move(m + 136, y, innerW - 136, phPatH)
+        y += phPatH + sp * 2
     } else {
         y += sp                         ; keep phBlockH and the layout in step
     }
@@ -1044,30 +1090,38 @@ OnSizeGui(guiObj, MinMax, W, H) {
     RT.lblEol.Move(m + 160, y, 80, lblH)
     RT.ddlEol.Move(m + 242, y - 3, 120, rowH)
     RT.cbShade.Move(m + 374, y, 130, lblH)
+    RT.cbTabs.Move(m + innerW - RT.TabsCbW, y, RT.TabsCbW, lblH)
     y += lblH
     RT.reSubject.Move(m, y, innerW, subjH)
     y += subjH + sp
 
-    RT.tabs.Move(m, y, innerW, tabsH)
-    tx := m + 10, ty := y + 28, tw := innerW - 20, th := tabsH - 38
-    lvmW := Integer(tw * 0.44)
-    RT.lvMatches.Move(tx, ty, lvmW, th)
-    RT.lvMatches.ModifyCol(1, 34), RT.lvMatches.ModifyCol(2, 55), RT.lvMatches.ModifyCol(3, 45)
-    RT.lvMatches.ModifyCol(4, Max(80, lvmW - 34 - 55 - 45 - 26))
-    RT.lvGroups.Move(tx + lvmW + 6, ty, tw - lvmW - 6, th)
-    RT.lvGroups.ModifyCol(1, 34), RT.lvGroups.ModifyCol(2, 90)
-    RT.lvGroups.ModifyCol(3, 55), RT.lvGroups.ModifyCol(4, 45)
-    RT.lvGroups.ModifyCol(5, Max(80, tw - lvmW - 6 - 34 - 90 - 55 - 45 - 26))
-    RT.edReplaced.Move(tx, ty, tw, th)
-    RT.edCode.Move(tx, ty, tw, th)
-    RT.edCheat.Move(tx, ty, tw, th)
+    ; Guarded rather than returned early: the redraw restore and the
+    ; SuppressHScroll calls at the bottom of this function have to run in
+    ; both states.
+    if (tabsShown) {
+        RT.tabs.Move(m, y, innerW, tabsH)
+        tx := m + 10, ty := y + 28, tw := innerW - 20, th := tabsH - 38
+        lvmW := Integer(tw * 0.44)
+        RT.lvMatches.Move(tx, ty, lvmW, th)
+        RT.lvMatches.ModifyCol(1, 34), RT.lvMatches.ModifyCol(2, 55), RT.lvMatches.ModifyCol(3, 45)
+        RT.lvMatches.ModifyCol(4, Max(80, lvmW - 34 - 55 - 45 - 26))
+        RT.lvGroups.Move(tx + lvmW + 6, ty, tw - lvmW - 6, th)
+        RT.lvGroups.ModifyCol(1, 34), RT.lvGroups.ModifyCol(2, 90)
+        RT.lvGroups.ModifyCol(3, 55), RT.lvGroups.ModifyCol(4, 45)
+        RT.lvGroups.ModifyCol(5, Max(80, tw - lvmW - 6 - 34 - 90 - 55 - 45 - 26))
+        RT.edReplaced.Move(tx, ty, tw, th)
+        RT.edCode.Move(tx, ty, tw, th)
+        RT.edCheat.Move(tx, ty, tw, th)
+    }
 
-    ; Both rich edits word-wrap, so neither can ever scroll sideways -- but
+    ; All three rich edits word-wrap, so none can ever scroll sideways -- but
     ; being Moved above makes them re-assert a horizontal bar.  Undo that here,
     ; still inside the redraw-off window, so the RedrawWindow below picks it up
     ; and nothing flickers.
     SuppressHScroll(RT.rePattern.Hwnd)
     SuppressHScroll(RT.reSubject.Hwnd)
+    if (phShown)
+        SuppressHScroll(RT.edPhPat.Hwnd)
 
     DllCall("user32\SendMessageW", "Ptr", guiObj.Hwnd, "UInt", WM_SETREDRAW, "Ptr", 1, "Ptr", 0)
     DllCall("RedrawWindow", "Ptr", guiObj.Hwnd, "Ptr", 0, "Ptr", 0,
@@ -1098,6 +1152,110 @@ UpdateTitle() {
 ; Every code path that asks "is this a placeholder?" routes through ExpandText
 ; or SplitRefs, so gating those two covers expansion, code generation, the
 ; top-level-| hazard analysis and the hit counts.
+; ---- the placeholder pattern box -------------------------------------------
+; Same tokenizer, same colors, same guard-against-our-own-writes dance as the
+; main pattern box.  What it deliberately does NOT get is the matching-paren
+; highlight: that machinery is written against RT.rePattern's cached pairing,
+; and a second copy of it for a two-line box would cost more than it returns.
+PhPatText() {
+    t := RT.edPhPat.GetText()
+    t := StrReplace(t, "`r`n", "`n")
+    t := StrReplace(t, "`r", "`n")
+    ; A placeholder pattern is a fragment on one line.  If somebody pastes
+    ; several, fold them together rather than letting a stray newline into the
+    ; middle of the effective pattern, where it would match literally.
+    return StrReplace(t, "`n", "")
+}
+
+SetPhPatText(txt) {
+    RT.PhShading := true
+    RT.edPhPat.SetText(txt)
+    RT.edPhPat.SetSel(0, -1)
+    RT.edPhPat.SetFont({Name: SUBJ_FONT, Size: SUBJ_SIZE, Style: "N"
+                      , Color: "Auto", BkColor: "Auto"})
+    RT.edPhPat.SetSel(0, 0)
+    RT.PhShading := false
+    SuppressHScroll(RT.edPhPat.Hwnd)
+    RT.LastPhPatText := txt
+    SchedulePhPatColors()
+}
+
+PhPatChanged() {
+    if (RT.PhShading)
+        return
+    t := PhPatText()
+    if (t == RT.LastPhPatText)       ; a formatting-only notification
+        return
+    RT.LastPhPatText := t
+    PhEdited()
+    SchedulePhPatColors()
+}
+
+SchedulePhPatColors() {
+    if (RT.Loading || !RT.edPhPat)
+        return
+    SetTimer(ApplyPhPatColors, -COLOR_DELAY)
+}
+
+ApplyPhPatColors(*) {
+    SetTimer(ApplyPhPatColors, 0)
+    if (!RT.edPhPat || !PhOn())
+        return
+    ; Recoloring saves and restores the selection, which cancels a drag in
+    ; progress -- but only a drag inside THIS control.  Clicking a row in the
+    ; list view above also leaves the button physically down, and deferring for
+    ; that would add a visible pause to exactly the case that should feel
+    ; instant, so the focus test lets it through.
+    if (GetKeyState("LButton", "P") && RT.edPhPat.Focused) {
+        SetTimer(ApplyPhPatColors, -COLOR_DELAY)
+        return
+    }
+    RE := RT.edPhPat
+    info := AnalyzePattern(PhPatText())
+    RT.PhShading := true
+    sel := RE.GetSel()
+    scr := RE.GetScrollPos()
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 0, "Ptr", 0)
+    RE.SetSel(0, -1)
+    RE.SetFont({Style: "N", Color: "Auto", BkColor: "Auto"})
+    ApplyRuns(RE, info.runs)
+    RE.SetSel(sel.S, sel.E)
+    RE.SetScrollPos(scr.X, scr.Y)
+    DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 1, "Ptr", 0)
+    DllCall("InvalidateRect", "Ptr", RE.Hwnd, "Ptr", 0, "Int", 1)
+    RT.PhShading := false
+}
+
+; ---- the results tabs ------------------------------------------------------
+; Folding the tabs away hands their half of the flexible height to the
+; haystack, which is the point: a long subject is far easier to read at double
+; the height, and the tabs are not much use while you are still pasting text in.
+TabsOn() {
+    return (RT.cbTabs && RT.cbTabs.Value) ? true : false
+}
+
+ToggleTabs() {
+    ApplyTabsVisible()
+    Status(TabsOn() ? "Results tabs shown."
+                    : "Results tabs hidden -- the haystack now has the whole pane.")
+}
+
+ApplyTabsVisible() {
+    on := TabsOn()
+    ; The tab control and NOTHING ELSE.  Under Tab3 the page controls are real
+    ; children of the tab control, so they follow it without being asked.
+    ;
+    ; Touching them individually is actively harmful, which is worth recording
+    ; because it looks like the safer option: setting Visible on a control that
+    ; lives on a tab page takes it out of the tab control's hands for good.
+    ; AHK then stops re-showing it when its page is selected, so hiding pages
+    ; 2-4 here to avoid them stacking up left them permanently blank -- the tab
+    ; still switched, but there was nothing on it any more.
+    RT.tabs.Visible := on
+    if (RT.Shown)
+        OnSizeGui(RT.gui, 0, RT.WinW, RT.WinH)
+}
+
 PhOn() {
     return (RT.cbPh && RT.cbPh.Value) ? true : false
 }
@@ -1106,6 +1264,7 @@ TogglePh() {
     ApplyPhVisible()
     ScheduleRun()                  ; the effective pattern just changed meaning
     SchedulePatternColors()
+    SchedulePhPatColors()          ; %refs% inside a placeholder change meaning too
     on := PhOn()
     Status(on ? "Placeholder support on."
               : "Placeholder support off -- %name% is now matched as literal text.")
@@ -1113,8 +1272,12 @@ TogglePh() {
 
 ApplyPhVisible() {
     on := PhOn()
-    for c in [RT.lvPh, RT.btnAdd, RT.btnDel, RT.btnUp, RT.btnDn, RT.edPhName, RT.edPhPat]
+    for c in [RT.lvPh, RT.btnAdd, RT.btnDel, RT.btnUp, RT.btnDn, RT.edPhName]
         c.Visible := on
+    ; RichEdit exposes Visible as a get-only property, so the wrapper cannot be
+    ; assigned to the way a Gui.Control can.  Opt() is delegated properly and
+    ; does the same job.
+    RT.edPhPat.Opt(on ? "-Hidden" : "+Hidden")
     RT.lblPhHint.Visible := on
     ; The pattern label advertises %name% only while it means something.
     if (on)
@@ -1261,7 +1424,9 @@ AttachToolTips() {
         "Name of the selected row.  Letters, digits and underscore, not`n"
       . "starting with a digit -- the same rule as an AHK variable, because`n"
       . "that is exactly what it becomes on the AHK Code tab.")
-    CtrlToolTip(RT.edPhPat,
+    ; .RE is the wrapper's inner Gui.Custom control.  CtrlToolTip type-checks
+    ; for Gui.Control and would reject the RichEdit object itself.
+    CtrlToolTip(RT.edPhPat.RE,
         "Pattern text of the selected row, as RAW PCRE -- not an AHK string`n"
       . "literal.  Type a backslash-t for a tab, not a backtick-t.`n`n"
       . "A placeholder may reference other placeholders as %name%.`n"
@@ -1274,9 +1439,9 @@ AttachToolTips() {
       . "front of the pattern.`n`n"
       . "Double-click a placeholder row to drop its %name% in at the caret.")
     CtrlToolTip(RT.btnKey,
-        "Opens a legend for the pattern box: every Coloring rule, shown in`n"
-      . "the Color it actually produces, next to a sample that produces it.`n`n"
-      . "The samples are run through the same tokenizer that Colors the`n"
+        "Opens a legend for the pattern box: every coloring rule, shown in`n"
+      . "the color it actually produces, next to a sample that produces it.`n`n"
+      . "The samples are run through the same tokenizer that colors the`n"
       . "pattern box, so the legend cannot fall out of date.")
     CtrlToolTip(RT.btnAddSnip,
         "Banks the current pattern in the Snippets list.`n`n"
@@ -1369,10 +1534,20 @@ AttachToolTips() {
     CtrlToolTip(RT.lblEol,  EolTipText())
     CtrlToolTip(RT.ddlEol,  EolTipText())
     CtrlToolTip(RT.cbShade,
-        "Tints each match in the haystack, alternating two Colors so that`n"
+        "Tints each match in the haystack, alternating two colors so that`n"
       . "two matches which touch stay distinguishable.`n`n"
       . "Shading pushes entries onto the rich edit's undo stack, so Ctrl+Z`n"
       . "in that pane can take a few presses to reach your own typing.")
+
+    CtrlToolTip(RT.cbTabs,
+        "Folds the results tabs away and hands their share of the window to`n"
+      . "the haystack, which is useful while you are still pasting text in.`n`n"
+      . "The haystack and the tabs normally split the flexible height evenly.`n"
+      . "With the tabs hidden the haystack takes all of it, so this roughly`n"
+      . "doubles the room for the text you are matching against.`n`n"
+      . "Matching still runs while they are hidden; the Matches list is`n"
+      . "simply not on screen to show you the result.  The setting is saved`n"
+      . "with the session.")
 
     ; --- status bar -------------------------------------------------------
     ; Status() replaces this text on every update.  Registering it here just
@@ -1497,7 +1672,7 @@ PhDelete() {
     RT.PhNames.RemoveAt(row)
     RT.CurPh := 0
     RefreshPhList()
-    RT.edPhName.Value := "", RT.edPhPat.Value := ""
+    RT.edPhName.Value := "", SetPhPatText("")
     ScheduleRun()
 }
 
@@ -1524,8 +1699,16 @@ PhRowFocused() {
     RT.CurPh := row
     RT.Loading := true
     RT.edPhName.Value := RT.PhNames[row]
-    RT.edPhPat.Value  := RT.PhMap[RT.PhNames[row]]
+    SetPhPatText(RT.PhMap[RT.PhNames[row]])
     RT.Loading := false
+    ; SetPhPatText() asks for a recolor, but RT.Loading was still set when it
+    ; did, and SchedulePhPatColors() bails while loading -- that flag is here to
+    ; stop the Change events these two assignments raise from being mistaken for
+    ; user edits.  So the request was swallowed and the pattern sat in flat black
+    ; until the first keystroke woke it up.  Ask again now the flag is clear.
+    ; SetPatternText() never hits this because every one of its callers already
+    ; re-schedules after clearing the flag.
+    SchedulePhPatColors()
 }
 
 ; Live edit of the selected row's name / pattern.
@@ -1534,7 +1717,7 @@ PhEdited() {
         return
     oldName := RT.PhNames[RT.CurPh]
     newName := Trim(RT.edPhName.Value)
-    newPat  := RT.edPhPat.Value
+    newPat  := PhPatText()
 
     if (newName != oldName) {
         if (newName = "" || !RegExMatch(newName, "^[A-Za-z_]\w*$")) {
@@ -1596,7 +1779,7 @@ SetPatternText(txt) {
 }
 
 PatternChanged() {
-    if (RT.PatShading)                       ; our own reColoring
+    if (RT.PatShading)                       ; our own recoloring
         return
     if (PatternText() == RT.LastPatText)     ; formatting-only notification
         return
@@ -1618,14 +1801,14 @@ SchedulePatternColors() {
 }
 
 ; ==========================================================================
-;                        PATTERN SYNTAX ColorING
+;                        PATTERN SYNTAX COLORING
 ; ==========================================================================
 ; AnalyzePattern() is one left-to-right pass over the raw pattern.  It is first
 ; and foremost a HIGHLIGHTER -- anything it cannot classify keeps the default
-; Color rather than being called a mistake -- but it does flag the handful of
+; color rather than being called a mistake -- but it does flag the handful of
 ; constructs PCRE itself will not compile.  That division is the whole design
 ; rule: white-on-red means "this pattern will not run", never "this looks odd
-; to me".  Anything merely unusual gets a Color, not an accusation.
+; to me".  Anything merely unusual gets a color, not an accusation.
 ;
 ; Two consequences worth spelling out, because they look like omissions:
 ;
@@ -1643,27 +1826,27 @@ SchedulePatternColors() {
 ;   runs    -- array of {s, e, fg, bg, st}, zero-based and end-exclusive.
 ;              "" in fg, bg or st means "leave that attribute alone".  That is
 ;              what lets the pale tint over a character class survive while the
-;              escapes inside it get their own foreground Colors painted on
+;              escapes inside it get their own foreground colors painted on
 ;              top, in a later run over the same characters.
 ;   pairs   -- Map of 0-based paren position -> its partner's position, filled
 ;              in both directions.  Drives the caret's matching-paren
 ;              highlight, and is the reason that feature can ignore an escaped
 ;              \( or a "(" sitting inside a character class.
-;   parenFg -- Map of 0-based paren position -> the Color it was painted, so
+;   parenFg -- Map of 0-based paren position -> the color it was painted, so
 ;              the highlight can be lifted again without re-running the pass.
 ; The three optional parameters exist for the Color Key window, which has to
 ; render each specimen the same way every time regardless of which option boxes
 ; happen to be ticked.  Left unset -- which is every call from the pattern box
-; -- they fall through to the live controls, so ordinary Coloring is unchanged.
+; -- they fall through to the live controls, so ordinary coloring is unchanged.
 AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
     runs := [], pairs := Map(), parenFg := Map(), openStack := []
-    names := Map(), nameDefs := [], backrefs := []
+    names := Map(), nameDefs := [], backrefs := [], litSpans := []
     names.CaseSense := true              ; PCRE subpattern names are case-sensitive
     depth := 0, capCount := 0
     lastAtom := false                    ; is there anything a quantifier could repeat?
     n := StrLen(pat), i := 1
 
-    ; The x and J options change what is legal, so the Coloring has to know
+    ; The x and J options change what is legal, so the coloring has to know
     ; about the checkboxes.  Guarded because a stray early call would otherwise
     ; die on an empty optBoxes map.
     xMode := IsSet(xOpt) ? xOpt : (RT.optBoxes.Has("x") ? RT.optBoxes["x"].Value : 0)
@@ -1697,7 +1880,8 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
         }
 
         ; --- \Q ... \E : everything between is literal ----------------------
-        if (c = "\" && SubStr(pat, i + 1, 1) = "Q") {
+        if (c = "\" && SubStr(pat, i + 1, 1) == "Q") {   ; == : see ScanEscape
+            qS := i - 1
             q := InStr(pat, "\E", , i + 2)
             runs.Push({s: i - 1, e: i + 1, fg: PC_ESC, bg: "", st: ""})
             if (q) {
@@ -1710,6 +1894,7 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
                     runs.Push({s: i + 1, e: n, fg: PC_ESCLIT, bg: "", st: ""})
                 i := n + 1
             }
+            litSpans.Push({s: qS, e: i - 1})     ; the whole \Q...\E run
             lastAtom := true
             continue
         }
@@ -1723,6 +1908,11 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
                        bg: bad ? PC_BAD_BG : "", st: ""})
             if (es.kind = "backref" && es.ref != "")
                 backrefs.Push({s: i - 1, e: i - 1 + es.len, ref: es.ref})
+            ; \. and \( match one ordinary character, so they belong with the
+            ; literal run either side of them.  That is what keeps Mr\. Smith
+            ; reading as one tinted string instead of three.
+            if (es.kind = "lit")
+                litSpans.Push({s: i - 1, e: i - 1 + es.len})
             i += es.len
             lastAtom := true
             continue
@@ -1798,7 +1988,7 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
 
             if (SubStr(pat, i + 1, 1) = "?") {
                 ; --- named capturing group: (?<name>  (?'name'  (?P<name> ----
-                ; The bracket itself keeps the depth Color so the group is
+                ; The bracket itself keeps the depth color so the group is
                 ; still findable by shape; only the plumbing and the name get
                 ; their own treatment.
                 if RegExMatch(pat, "A)\(\?(P?<|')([A-Za-z_]\w*)(>|')", &gm, i) {
@@ -1836,7 +2026,7 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
                 }
                 ; --- (?:  (?i:  (?-x:  (?>  (?| ------------------------------
                 ; Scoped option groups used to fall off the end of this chain
-                ; and get two characters Colored out of four.
+                ; and get two characters colored out of four.
                 if RegExMatch(pat, "A)\(\?(\^?[imsxJUXn]*(-[imsxJUXn]+)?:|>|\|)", &gm, i) {
                     col := ParenColor(depth)
                     runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
@@ -1925,15 +2115,45 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
         } else if (c = "]" || c = "}" || c = "{") {
             ; Legal, and literal.  See the note at the top of this function.
             runs.Push({s: i - 1, e: i, fg: PC_LITERAL, bg: "", st: ""})
+            litSpans.Push({s: i - 1, e: i})
             lastAtom := true
         } else {
+            litSpans.Push({s: i - 1, e: i})
             lastAtom := true
         }
         i++
     }
 
+    ; --- text the pattern matches literally --------------------------------
+    ; Collected during the pass and merged here rather than pushed a character
+    ; at a time: a 300-character literal would otherwise mean 300 SetSel and
+    ; SetFont round trips instead of one.  Merging is also what makes the tint
+    ; read as words rather than as a row of separate blocks.
+    ;
+    ; A background rather than a foreground, because literals are usually the
+    ; majority of a pattern -- recoloring them would repaint most of the box
+    ; and cost black, which is the most readable color available for the part
+    ; you most want to read.  A wash behind them groups without shouting.
+    ;
+    ; Pushed BEFORE the error runs below so nothing dilutes a red mark, and
+    ; before the placeholders, whose own background wins over this one.  Runs
+    ; inside a character class never get here, so a class keeps its own tint.
+    if (litSpans.Length) {
+        cs := litSpans[1].s, ce := litSpans[1].e
+        loop litSpans.Length - 1 {
+            nx := litSpans[A_Index + 1]
+            if (nx.s = ce) {                     ; touching the previous one
+                ce := nx.e
+                continue
+            }
+            runs.Push({s: cs, e: ce, fg: "", bg: PC_LIT_BG, st: ""})
+            cs := nx.s, ce := nx.e
+        }
+        runs.Push({s: cs, e: ce, fg: "", bg: PC_LIT_BG, st: ""})
+    }
+
     ; --- "(" that never closed.  Pushed after the loop so they paint over the
-    ; --- depth Color the opener already got.
+    ; --- depth color the opener already got.
     for openPos in openStack
         runs.Push({s: openPos, e: openPos + 1, fg: PC_BAD_FG, bg: PC_BAD_BG, st: ""})
 
@@ -1996,7 +2216,7 @@ EscColor(kind) {
 ;
 ; That is the point of doing it this way.  The old tokenizer handled "%" inline
 ; and swallowed a character class in one bite, so [%vowels%] got no placeholder
-; Color -- while ExpandText(), which just scans the raw string, substituted it
+; color -- while ExpandText(), which just scans the raw string, substituted it
 ; regardless.  Highlighting and expansion disagreed.  Now they cannot: the same
 ; expression at the same offsets decides both, so what is tinted is exactly
 ; what gets swapped in, inside classes and (?#comments) included.
@@ -2031,18 +2251,25 @@ PushPlaceholders(pat, runs, phMap?) {
 ; backreference forms are outright errors.  Getting that wrong in either
 ; direction produces a red mark on a working pattern.
 ScanEscape(pat, i, n, inClass) {
+    ; EVERY letter test below uses == rather than =, and must keep doing so.
+    ; AHK's = compares case-INSENSITIVELY, so c = "g" is also true for "G" --
+    ; which sent \G and \K down the \g{name} backreference branch, found no
+    ; brace or angle after them, and reported two perfectly good assertions as
+    ; errors.  The same trap was waiting for \X (caught by the \x hex test),
+    ; \C (caught by \cA, swallowing the following character), \q (caught by
+    ; \Q) and \e (caught by \E).
     static valid := "ABCDEGHKNPQRSVWXZabcdefghknoprstvwxz"
     if (i >= n)                                ; trailing lone backslash
         return {len: 1, kind: "bad", ref: ""}
     c := SubStr(pat, i + 1, 1)
 
-    if (c = "Q")
+    if (c == "Q")
         return {len: 2, kind: "quote", ref: ""}
-    if (c = "E")
+    if (c == "E")
         return {len: 2, kind: "endq", ref: ""}
 
     ; --- \x41  \x{263A} ---------------------------------------------------
-    if (c = "x") {
+    if (c == "x") {
         if (SubStr(pat, i + 2, 1) = "{") {
             cl := InStr(pat, "}", , i + 2)
             if (!cl)
@@ -2054,7 +2281,7 @@ ScanEscape(pat, i, n, inClass) {
     }
 
     ; --- \o{17} -----------------------------------------------------------
-    if (c = "o") {
+    if (c == "o") {
         if (SubStr(pat, i + 2, 1) != "{")
             return {len: 2, kind: "bad", ref: ""}
         cl := InStr(pat, "}", , i + 2)
@@ -2064,14 +2291,14 @@ ScanEscape(pat, i, n, inClass) {
     }
 
     ; --- \cA --------------------------------------------------------------
-    if (c = "c") {
+    if (c == "c") {
         if (i + 2 > n)
             return {len: 2, kind: "bad", ref: ""}
         return {len: 3, kind: "num", ref: ""}
     }
 
     ; --- \p{L}  \P{^Lu}  \pL ----------------------------------------------
-    if (c = "p" || c = "P") {
+    if (c == "p" || c == "P") {
         if (SubStr(pat, i + 2, 1) = "{") {
             cl := InStr(pat, "}", , i + 2)
             if (!cl)
@@ -2096,7 +2323,7 @@ ScanEscape(pat, i, n, inClass) {
     }
 
     ; --- \g1  \g{2}  \g{-1}  \g<name>  \k<name>  \k{name} -----------------
-    if (c = "g" || c = "k") {
+    if (c == "g" || c == "k") {
         if (inClass)
             return {len: 2, kind: "bad", ref: ""}
         if RegExMatch(pat, "A)\\[gk](\{[+-]?\w+\}|<[+-]?\w+>|'[+-]?\w+'|[+-]?\d+)", &m, i)
@@ -2107,7 +2334,7 @@ ScanEscape(pat, i, n, inClass) {
     ; --- position assertions ----------------------------------------------
     if (!inClass && InStr("bBAZzGK", c, true))
         return {len: 2, kind: "assert", ref: ""}
-    if (inClass && c = "b")                    ; inside a class, \b is backspace
+    if (inClass && c == "b")                    ; inside a class, \b is backspace
         return {len: 2, kind: "num", ref: ""}
 
     ; --- escapes that match a character -----------------------------------
@@ -2136,7 +2363,7 @@ ScanEscape(pat, i, n, inClass) {
 ;
 ; The class gets a pale background across its whole span and then has its
 ; contents painted on top, so it still reads as one object while \d, [:alpha:]
-; and the range hyphens keep the same Colors they have everywhere else.
+; and the range hyphens keep the same colors they have everywhere else.
 ScanClass(pat, i, n, runs) {
     static posix := "alpha,alnum,ascii,blank,cntrl,digit,graph,lower,print,"
                   . "punct,space,upper,word,xdigit"
@@ -2253,7 +2480,7 @@ ApplyPatternColors(*) {
     SetTimer(ApplyPatternColors, 0)
     if (!RT.rePattern)
         return
-    ; ReColoring has to save and restore the selection, and doing that in the
+    ; Recoloring has to save and restore the selection, and doing that in the
     ; middle of a click-drag cancels the drag.  Wait until the button is up.
     if (GetKeyState("LButton", "P")) {
         SetTimer(ApplyPatternColors, -COLOR_DELAY)
@@ -2301,12 +2528,12 @@ ApplyPatternColors(*) {
 ; which is why this is worth deriving from the parse rather than doing on the
 ; raw text.
 ;
-; Only two characters are repainted, never the whole box: a full reColor on
-; every caret movement would be visible as a flicker.  The Color to put back
+; Only two characters are repainted, never the whole box: a full recolor on
+; every caret movement would be visible as a flicker.  The color to put back
 ; comes from RT.PatParenFg, recorded during the same pass that did the pairing,
 ; which is also why RT.PatPairs is cleared the moment the text changes -- a
 ; stale map would happily highlight the wrong two characters during the
-; COLOR_DELAY window before the reColor catches up.
+; COLOR_DELAY window before the recolor catches up.
 UpdateParenMatch(*) {
     SetTimer(UpdateParenMatch, 0)
     if (!RT.rePattern || RT.PatShading || RT.ParenBusy)
@@ -2361,12 +2588,12 @@ UpdateParenMatch(*) {
 ; Runs are applied in the order they were pushed, and later ones deliberately
 ; overpaint earlier ones -- that is how the class tint ends up underneath its
 ; own contents, and how %placeholders% win over everything.  A run only sets the
-; attributes it actually names, so overpainting a Color does not disturb a
+; attributes it actually names, so overpainting a color does not disturb a
 ; background laid down earlier.
 ;
 ; 'off' shifts every run along by a fixed number of characters, which is what
 ; lets the Color Key window paste a specimen into the middle of a much longer
-; block of text and still Color it with the real tokenizer.
+; block of text and still color it with the real tokenizer.
 ApplyRuns(RE, runs, off := 0) {
     for r in runs {
         RE.SetSel(off + r.s, off + r.e)
@@ -2387,20 +2614,20 @@ PaintParenAt(RE, pos, fg, bg, st) {
     RE.SetFont({Color: fg, BkColor: bg, Style: st})
 }
 
-; ============================== Color KEY =================================
+; ============================== COLOR KEY =================================
 ; A legend for the pattern box, in a window of its own.
 ;
 ; The Cheat Sheet tab is a plain Edit control, so it can only ever DESCRIBE the
-; Colors in words -- and "royal blue means a reference to a group" is no use
+; colors in words -- and "royal blue means a reference to a group" is no use
 ; whatever to someone who cannot see royal blue.  Hence a second window with a
 ; rich edit in it, showing each rule rendered exactly as the pattern box would
 ; render it.
 ;
-; The important part is that nothing here is hand-Colored.  Each row carries a
+; The important part is that nothing here is hand-colored.  Each row carries a
 ; specimen pattern, that specimen is put through the real AnalyzePattern(), and
 ; the runs it returns are pasted in at the specimen's offset by ApplyRuns().
 ; The legend is therefore generated BY the highlighter rather than written to
-; describe it, and the two cannot drift apart: change a Color or a rule and
+; describe it, and the two cannot drift apart: change a color or a rule and
 ; this window follows on its own.  A row that stops looking right here is a
 ; genuine bug in the tokenizer, not a stale piece of documentation.
 ;
@@ -2412,8 +2639,13 @@ ColorKeyRows() {
     ; {h: heading}  |  {d: ""} blank spacer  |  {p: specimen, d: what it shows}
     ; x, j and ph are per-row overrides handed straight to AnalyzePattern.
     return [
+      {h: "TEXT MATCHED LITERALLY"},
+      {p: "Mon|Tue(s)?|Wed",     d: "tinted in runs, so the words read as words"},
+      {p: "Mr\. Smith",          d: "an escaped metacharacter joins the run"},
+      {p: "a b",                 d: "a literal space, invisible in plain black"},
+      {d: ""},
       {h: "STRUCTURE"},
-      {p: "(cat(dog(bird)))",     d: "nesting depth, cycling through three Colors"},
+      {p: "(cat(dog(bird)))",     d: "nesting depth, cycling through three colors"},
       {p: "(?:x) (?>x) (?|x)",    d: "non-capturing, atomic, branch reset"},
       {p: "(?<year>\d{4})",       d: "a named group; the name itself is picked out"},
       {p: "(?i) (?-x) (*SKIP)",   d: "directives that change how the rest is read"},
@@ -2441,7 +2673,7 @@ ColorKeyRows() {
       {h: "REFERRING BACK TO A GROUP"},
       {p: "(a)\1 (?<n>x)\k<n> (?&n)",   d: "backreferences and subroutine calls"},
       {d: ""},
-      {h: "LOOKS SPECIAL, ISN'T"},
+      {h: "LOOKS SPECIAL, IS NOT"},
       {p: "a] b} c{d",            d: "PCRE reads all three as ordinary characters"},
       {p: "a b # note", x: 1,     d: "with x ticked, discarded space and a comment"},
       {d: ""},
@@ -2514,10 +2746,10 @@ ShowColorKey(*) {
     g.OnEvent("Size", OnSizeKeyGui)
 
     ; --- three passes, coarse to fine ---------------------------------------
-    ; Everything goes grey, then each specimen is reset to the pattern box's own
+    ; Everything goes gray, then each specimen is reset to the pattern box's own
     ; default, then the tokenizer's runs go on top.  Painting the reset first is
     ; what keeps a specimen's ordinary literal characters black instead of
-    ; leaving them in the description Color.
+    ; leaving them in the description color.
     DllCall("user32\SendMessageW", "Ptr", RE.Hwnd, "UInt", 0x000B, "Ptr", 0, "Ptr", 0)
     RE.SetSel(0, -1)
     RE.SetFont({Style: "N", Color: DESC_FG, BkColor: "Auto"})
@@ -2910,13 +3142,14 @@ ScheduleRun() {
     if (RT.Loading)
         return
     SchedulePatternColors()
+    SchedulePhPatColors()          ; the x and J boxes change its coloring too
     if (RT.cbLive && !RT.cbLive.Value)
         return
     SetTimer(RunTest, -RUN_DELAY)
 }
 
 SubjectChanged() {
-    if (RT.Shading)                      ; our own reColoring, not a real edit
+    if (RT.Shading)                      ; our own recoloring, not a real edit
         return
     if (CanonText() == RT.Raw)           ; formatting-only notification
         return
@@ -3377,7 +3610,7 @@ DoImport(code, clearFirst) {
         ApplyPhVisible()
     }
     RefreshPhList()
-    RT.edPhName.Value := "", RT.edPhPat.Value := "", RT.CurPh := 0
+    RT.edPhName.Value := "", SetPhPatText(""), RT.CurPh := 0
     Status("Imported " added " placeholder" (added = 1 ? "" : "s")
          . (gotPattern ? " and the main pattern." : ".  (No RegExMatch/RegExReplace call found.)"))
     RunTest()
@@ -3552,6 +3785,7 @@ SaveSession(announce := false, path := "") {
     txt .= "WRAP=" (RT.cbWrap.Value ? 1 : 0) "`r`n"
     txt .= "TIPS=" (RT.cbTips.Value ? 1 : 0) "`r`n"
     txt .= "PHON=" (RT.cbPh.Value ? 1 : 0) "`r`n"
+    txt .= "TABS=" (RT.cbTabs.Value ? 1 : 0) "`r`n"
     ; Client size, i.e. the same numbers Gui.Show's w/h take, so it round-trips
     ; without having to guess at the border and title-bar thickness.
     txt .= "WINW=" RT.WinW "`r`n"
@@ -3598,13 +3832,13 @@ LoadSession(path := "") {
     if (path = "")
         path := RT.SessionFile
     if !FileExist(path) {
-        LoadDemo()
+        LoadDemoDates()
         return
     }
     try {
         txt := FileRead(path, "UTF-8")
     } catch {
-        LoadDemo()
+        LoadDemoDates()
         return
     }
     RT.SessionFile := path         ; "Open session" adopts it too -- see above
@@ -3627,6 +3861,7 @@ LoadSession(path := "") {
             case "WRAP":    RT.cbWrap.Value := (val = "1")
             case "TIPS":    RT.cbTips.Value := (val = "1")
             case "PHON":    RT.cbPh.Value := (val = "1")
+            case "TABS":    RT.cbTabs.Value := (val = "1")
             case "WINW":    RT.WinW := ClampSize(val, true)
             case "WINH":    RT.WinH := ClampSize(val, false)
             case "EOL":     RT.ddlEol.Value := Max(1, Min(3, Integer(val)))
@@ -3681,7 +3916,7 @@ ClearAll() {
     RT.Loading := true
     RT.PhNames := [], RT.PhMap := Map(), RT.CurPh := 0
     RefreshPhList()
-    RT.edPhName.Value := "", RT.edPhPat.Value := ""
+    RT.edPhName.Value := "", SetPhPatText("")
     SetPatternText(""), RT.edRepl.Value := ""
     SetSubjectText("")
     RT.Loading := false
@@ -3689,7 +3924,7 @@ ClearAll() {
     RunTest()
 }
 
-LoadDemo() {
+LoadDemoDates() {
     RT.Loading := true
     RT.PhNames := [], RT.PhMap := Map(), RT.CurPh := 0
     AddPh("reMonth",     "\b((Jan|Feb)(r?u(ary)?)?|Mar(ch)?|Apr(il)?|May|Jun(e)?|Jul(y)?|Aug(ust)?|(Sep(tem)?|Oct(o)?|Nov|Dec)(em)?(ber)?)\b")
@@ -3717,6 +3952,154 @@ LoadDemo() {
     ; otherwise loading it would look like it had done nothing.
     RT.cbPh.Value := 1
     ApplyPhVisible()
+    RT.Loading := false
+    ModeChanged()
+    SchedulePatternColors()
+    RunTest()
+}
+
+; The other demo, and deliberately the opposite kind of thing: no placeholders
+; at all, just one large self-contained pattern of the sort any regex tester
+; would be handed.  Between the two, a first-time user sees both what makes
+; this tester different and what it does for everybody else.
+;
+; The pattern is AndyMBody's hotstring parser, the one AutoCorrect2's
+; HotstringHelper uses.  It earns its place beyond being realistic: it needs
+; the J option to compile at all, and it is long enough that the
+; matching-paren highlight starts to pay for itself.
+;
+; Worth knowing when reading the results: HotstringHelper feeds this pattern a
+; single line at a time, and on one line it is exact.  Run against a whole
+; library, as here, the second (?<Repl>) branch is [\s\S]+?, which will cross
+; a line break to reach the next "  ;" it can find -- so the first match runs
+; on past where you would expect it to stop.  Nothing is broken; the pattern is
+; being asked a question it was not written for.
+;
+; Both strings below are continuation sections rather than quoted literals,
+; which is what CheatSheet() does and for the same reason: the text is full of
+; double quotes, and inside a continuation section quotes are literal.  Two
+; things still need escaping -- a backtick, and a ")" at the start of a line,
+; which would otherwise end the section early.
+LoadDemoHotstrings() {
+    RT.Loading := true
+
+    ; Emptied, not merely hidden.  Leaving the date placeholders lying about
+    ; would put six unused rows into the generated AHK code on the other tab.
+    RT.PhNames := [], RT.PhMap := Map(), RT.CurPh := 0
+    RefreshPhList()
+    RT.edPhName.Value := "", SetPhPatText("")
+
+    SetPatternText("
+    (
+^:(?<Opts>[^:]+)*:(?<Trig>[^:]+)::(?:f\("(?<Repl>[^"]*)"(?:\h*,\h*(?<Log>[01]))?(?:\h*,\h*(?<Paste>[01]))?\)|(?<Repl>[\s\S]+?)(?=\h+;|\z))?(?<Comm>\h+;.+)?$
+    )")
+
+    ; J is not optional: (?<Repl>...) is defined once per branch of the
+    ; alternation, and without DUPNAMES the pattern does not compile.  Untick
+    ; it and both copies of the name turn red in the pattern box.
+    SetOptions("imJ")
+    RT.edRepl.Value := "[${Trig}]"
+
+    ; RTrim0 because several lines end in meaningful tabs, and a continuation
+    ; section would otherwise trim them away.
+    demo := "
+    (RTrim0
+Note:  The above big regex was written by AndyMBody.
+; Vanilla AHK hotstring 
+::trigger::replacement
+::;rrr::reading, writing, and math
+:B0X*:alltime::f("all-time") ; Fixes 1 word 
+:B0X*:alma matter::f("alma mater") ; Fixes 1 word
+
+:B0X*:along it's::f("along its") ; Fixes 1 word
+
+; To-be-typed boilerplate items are now wrapped in f() function calls.  This allows InputBuffering with Descolada's InputBuffer class.  We don't want to log these, so they get '0' as a second param.  We want to type (not paste) them, and paste=0 is the default, so no need to include the third param. 
+:B0X:;sdda::f("Developmental Disabilities Administration (DDA)", 0)
+:B0X:;sdi::f("specially-designed instruction", 0)
+:B0X:;sdial::f("Developmental Indicators for the Assessment of Learning-Fourth Ed (DIAL-4)", 0)
+
+; This is a larger boilerplate item.  It also does not get logged (only AutoCorrections get logged) so it needs the second param.  Also, it does get pasted, rather than typed, which is not the f() default, so the third param is also needed. 
+:B0X:;rrrr::f("
+(RTrim0
+Basic Reading		
+Reading Comprehension	
+Reading Fluency		
+Math Calculations	
+Applied Math		
+Written Expression	
+`)",0,1)
+
+
+::ttfn::f("Ta Ta For Now (TTFN)")
+
+
+:B0X:;homer::f("
+(
+Homer Simpson
+Marge Simpson
+Bart Simpson
+Lisa Simpson
+Maggie Simpson
+Ned Flanders
+Maude Flanders
+Rod Flanders
+Todd Flanders
+Seymour Skinner
+Edna Krabappel
+Moe Szyslak
+Barney Gumble
+Apu Nahasapeemapetilon
+Clancy Wiggum
+Ralph Wiggum
+Milhouse Van Houten
+Nelson Muntz
+Martin Prince
+Comic Book Guy
+Sideshow Bob
+Krusty the Clown
+Superintendent Chalmers
+Otto Mann
+Agnes Skinner
+`)",0,1)
+
+:B0X:;homer2::f("Homer Simpson``nMarge Simpson``nBart Simpson``nLisa Simpson``nMaggie Simpson``nNed Flanders``nMaude Flanders``nRod Flanders``nTodd Flanders``nSeymour Skinner``nEdna Krabappel``nMoe Szyslak``nBarney Gumble``nApu Nahasapeemapetilon``nClancy Wiggum``nRalph Wiggum``nMilhouse Van Houten``nNelson Muntz``nMartin Prince``nComic Book Guy``nSideshow Bob``nKrusty the Clown``nSuperintendent Chalmers``nOtto Mann``nAgnes Skinner2", 0, 1)
+
+:B0X:mltest::f(" ; Optional comment here
+(
+One
+Two
+Three
+`)",0) ; What about this comment?
+
+:B0X:mltest::f(" ; Optional comment here
+(
+One
+Two
+Three
+`)",0,1)
+
+:B0X:mltest::f(" ; Optional comment here
+(
+One
+Two (parenth not at beginning of line)
+Three
+`)",0,1)
+
+::;trig::replacement ;This is a comment.
+::;trig::replacement;This not is a comment.
+    )"
+    SetSubjectText(StrReplace(demo, "`n", "`r"))
+
+    RT.rdMatch.Value := 1, RT.rdReplace.Value := 0
+    RT.cbAll.Value := 1
+    RT.ddlEol.Value := 1
+
+    ; Folded away: with nothing in it, an open placeholder table would only be
+    ; an empty list taking height off the haystack, and this demo is precisely
+    ; the case where placeholders are not the point.
+    RT.cbPh.Value := 0
+    ApplyPhVisible()
+
     RT.Loading := false
     ModeChanged()
     SchedulePatternColors()
@@ -3887,15 +4270,15 @@ PLACEHOLDERS  (this tester only)
   The Hits column counts that placeholder's own matches in the haystack.
   The AHK Code tab turns the references back into concatenated variables.
 
-PATTERN BOX ColorS
+PATTERN BOX COLORS
   Press "Color Key" above the pattern box for the legend itself — every rule
-  shown in the Color it actually produces, which is not something this tab can
-  do, being plain black text.  What follows is only what the Colors MEAN.
+  shown in the color it actually produces, which is not something this tab can
+  do, being plain black text.  What follows is only what the colors MEAN.
 
   The palette is grouped by what things DO, so that things behaving alike look
   alike: green asserts a position and consumes nothing (^ $ \b \A, and the
   ?= ?! ?<= ?<! of a lookaround); teal matches a character; blue is repetition;
-  orange is a character class; and ( and ) cycle through three Colors by
+  orange is a character class; and ( and ) cycle through three colors by
   nesting depth, which is what makes the shape of a long alternation readable.
 
   WHITE ON RED means PCRE will refuse to compile the pattern.  It is never used
@@ -3905,14 +4288,20 @@ PATTERN BOX ColorS
   unknown [:posix:] name, a reference to a group that does not exist, and two
   named groups sharing a name while J is unticked.
 
+  Literal text — the words the pattern is actually looking for — sits on a pale
+  green wash, merged into runs so that Mon|Tue|Wed reads as three words rather
+  than as scattered letters.  An escaped metacharacter counts as literal and
+  joins the run, so Mr\. Smith stays one block.  A useful side effect: a
+  literal space, invisible in plain black, now shows up as a green gap.
+
   Conversely ] and } and a { that is not a quantifier are NOT errors — PCRE
-  reads all three as ordinary characters — so they get a pale grey that says
+  reads all three as ordinary characters — so they get a pale gray that says
   the bracket is not doing what it looks like, and nothing stronger.
 
   Put the caret beside any ( or ) and it lights up together with its partner,
   which is the quickest way to find the end of a long group.  Escaped and
   in-class brackets are skipped, because the pairing comes from the same parse
-  that does the Coloring rather than from counting brackets.
+  that does the coloring rather than from counting brackets.
 
   A %name% on a pale blue background resolves to a placeholder in the table; on
   a pink background it does not, which usually means a typo in the name, and it
@@ -3920,7 +4309,7 @@ PATTERN BOX ColorS
   painted over everything else, including inside character classes, because
   that is where they are substituted too.
 
-  Set PAT_FULL_SYNTAX := false near the top of the script to Color only the
+  Set PAT_FULL_SYNTAX := false near the top of the script to color only the
   placeholders, leave everything else black, and switch off the paren pairing.
 
 SNIPPETS
