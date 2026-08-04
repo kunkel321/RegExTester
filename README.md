@@ -1,7 +1,7 @@
 # RegExTester
 An AHK v2 RegEx Tester that uses placeholders.  As with all of my scripts, the exe is not a compiled version of the ahk.  It is a renamed copy of AutoHotkey.exe.  Both (RegExTester.ahk and RegExTester.exe) must be kept in the same folder. 
 
-![Screenshot of main window](https://github.com/kunkel321/RegExTester/blob/main/Images/ScreenSnip_20260728_145403.png)
+![Screenshot of main window](https://github.com/kunkel321/RegExTester/blob/main/images/RegExTesterDemo.gif)
 
 # From code comments
 #################################
