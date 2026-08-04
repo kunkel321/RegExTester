@@ -10,11 +10,13 @@ SetWorkingDir(A_ScriptDir)
 ; until the TUNABLES block below.
 try TraySetIcon("imageres.dll", 20)          ; a window with a green checkmark
 
-;#################################
-; App: REGEX TESTER for AHK v2
-; By: kunkel321 (with Claude)
-; Date: 8-2-2026
-;#################################
+;###############################################################
+; App:          REGEX TESTER for AHK v2
+; By:           kunkel321 (with Claude)
+; Date:         8-3-2026
+; AHK Forum:    https://www.autohotkey.com/boards/viewtopic.php?f=83&t=140951
+; GitHub:       https://github.com/kunkel321/RegExTester
+;###############################################################
 ; A live RegEx tester that runs on AutoHotkey's own PCRE engine, so what you
 ; see here is exactly what RegExMatch()/RegExReplace() will do in a script.
 ;
@@ -688,6 +690,10 @@ class RT {
     static lvMatches := "", lvGroups := "", edReplaced := ""
     static edCode := "", edCheat := "", sb := ""
     static optBoxes := Map()
+    ; --- effective-pattern group spans, computed lazily on first group click ---
+    static EffText  := ""          ; the string edEffective was last given
+    static EffCaps  := ""          ; array of {s, e} per capture group, or "" if not parsed yet
+    static EffBase  := 0           ; chars of option prefix ("i)") ahead of the pattern
     static cbTips := ""            ; "Show tips on hover"
     ; One LVHeaderToolTips instance per ListView.  They must outlive BuildGui,
     ; because each one owns a watchdog timer that re-reads the header rects.
@@ -857,7 +863,10 @@ BuildGui() {
     FontUI(g)
     RT.lblEff := g.Add("Text", "x10 y280 w300", "Effective pattern (what AHK receives):")
     FontMono(g)
-    RT.edEffective := g.Add("Edit", "x10 y300 w900 h40 +Multi +ReadOnly", "")
+    ; +0x100 is ES_NOHIDESEL: keeps the group highlight visible while focus is
+    ; on the groups ListView.  Without it the selection is drawn only when the
+    ; Edit itself has focus, i.e. never, for the way this box is used.
+    RT.edEffective := g.Add("Edit", "x10 y300 w900 h40 +Multi +ReadOnly +0x100", "")
 
     ; ---------- mode row ----------
     FontUI(g)
@@ -1841,6 +1850,7 @@ SchedulePatternColors() {
 AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
     runs := [], pairs := Map(), parenFg := Map(), openStack := []
     names := Map(), nameDefs := [], backrefs := [], litSpans := []
+    capOpens := []                       ; "(" position of capture group N, in order
     names.CaseSense := true              ; PCRE subpattern names are case-sensitive
     depth := 0, capCount := 0
     lastAtom := false                    ; is there anything a quantifier could repeat?
@@ -1854,7 +1864,7 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
 
     if (!PAT_FULL_SYNTAX) {
         PushPlaceholders(pat, runs, phMap?)
-        return {runs: runs, pairs: pairs, parenFg: parenFg}
+        return {runs: runs, pairs: pairs, parenFg: parenFg, caps: []}
     }
 
     while (i <= n) {
@@ -2003,7 +2013,7 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
                     parenFg[i - 1] := col
                     nameDefs.Push({s: nmS, e: nmE, name: gm[2]})
                     names[gm[2]] := names.Has(gm[2]) ? names[gm[2]] + 1 : 1
-                    capCount++
+                    capCount++, capOpens.Push(i - 1)
                     openStack.Push(i - 1), depth++
                     i += gm.Len
                     lastAtom := false
@@ -2055,7 +2065,7 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
             col := ParenColor(depth)
             runs.Push({s: i - 1, e: i, fg: col, bg: "", st: ""})
             parenFg[i - 1] := col
-            capCount++
+            capCount++, capOpens.Push(i - 1)
             openStack.Push(i - 1), depth++
             i++
             lastAtom := false
@@ -2194,7 +2204,18 @@ AnalyzePattern(pat, xOpt?, jOpt?, phMap?) {
     }
 
     PushPlaceholders(pat, runs, phMap?)
-    return {runs: runs, pairs: pairs, parenFg: parenFg}
+
+    ; --- capture group N -> the span of pattern text that defines it --------
+    ; capOpens holds the "(" of every capturing group in encounter order,
+    ; which is exactly PCRE's numbering, and pairs already knows where each
+    ; one closes.  Zero-based, end-exclusive, same convention as runs.  A
+    ; group whose ")" is missing is given a one-character span so an
+    ; unbalanced pattern still highlights something rather than throwing.
+    caps := []
+    for op in capOpens
+        caps.Push({s: op, e: (pairs.Has(op) ? pairs[op] + 1 : op + 1)})
+
+    return {runs: runs, pairs: pairs, parenFg: parenFg, caps: caps}
 }
 
 ParenColor(depth) => PC_PAREN[Mod(depth, PC_PAREN.Length) + 1]
@@ -3185,12 +3206,17 @@ RunTest(*) {
         expanded := ExpandText(PatternText(), Map(), unknown, RT.cbWrap.Value)
     } catch as e {
         RT.edEffective.Value := PatternText()
+        RT.EffText := PatternText(), RT.EffCaps := "", RT.EffBase := 0
         ShowError(e.Message)
         return
     }
     opts := BuildOptions()
     needle := opts ")" expanded
     RT.edEffective.Value := needle
+    ; Only the text is recorded here; the group spans are not worked out until
+    ; a group row is actually clicked, so a feature nobody is using costs a
+    ; string assignment per keystroke rather than a second parse.
+    RT.EffText := needle, RT.EffCaps := "", RT.EffBase := StrLen(opts) + 1
 
     ; Everything the tester can spot statically, as one note per entry so
     ; the tooltip can stack them.
@@ -3413,6 +3439,69 @@ SelectSpan(s, e) {
     RT.Shading := false
 }
 
+; -------------------- EFFECTIVE PATTERN GROUP HIGHLIGHT -------------------
+; Clicking a capture group in the results already selects that group's text in
+; the haystack.  These select the piece of the PATTERN that produced it, which
+; is the other half of the same question -- with 32 numbered groups in a
+; placeholder-built pattern, "where does group 15 live?" is not answerable by
+; eye.
+;
+; A plain Edit and EM_SETSEL rather than a rich edit and a background color:
+; only one group is ever selected at a time, so there is nothing to layer, and
+; the system highlight cannot collide with the syntax coloring scheme.
+;
+; The spans come from AnalyzePattern(), so an escaped \( , a "(" inside a
+; character class, and the "(" of a (?i) option set are all correctly skipped,
+; and a nested group gets its true extent rather than the nearest ")".
+;
+; Known gap: under the branch reset (?|...), PCRE reuses numbers across
+; branches while this counts them straight through, so group numbers past such
+; a construct will point at the wrong span.  Nothing else in the tokenizer
+; needs it either, so it is left alone rather than half-solved.
+EnsureEffCaps() {
+    if (IsObject(RT.EffCaps))                     ; already parsed this text
+        return true
+    if (RT.EffText = "")
+        return false
+    ; The option letters and their ")" are not part of the pattern -- feeding
+    ; them to the tokenizer would let that ")" pop the stack immediately.
+    body := SubStr(RT.EffText, RT.EffBase + 1)
+    opts := RT.EffBase > 1 ? SubStr(RT.EffText, 1, RT.EffBase - 1) : ""
+    info := AnalyzePattern(body, InStr(opts, "x", true) ? 1 : 0
+                               , InStr(opts, "J", true) ? 1 : 0)
+    RT.EffCaps := info.caps
+    return true
+}
+
+; A multiline Edit stores "`r`n" per line break.  Everything upstream of here
+; normalises to a bare "`n" (see PatternText), so a character offset into the
+; string runs one short per break against the control's own offsets.
+EffOffset(pos) {
+    if (pos <= 0)
+        return 0
+    n := 0
+    StrReplace(SubStr(RT.EffText, 1, pos), "`n", , , &n)
+    return pos + n
+}
+
+; gnum 0 clears the highlight.
+HighlightEffGroup(gnum) {
+    static EM_SETSEL := 0x00B1, EM_SCROLLCARET := 0x00B7
+    if (!RT.edEffective)
+        return
+    if (!gnum || !EnsureEffCaps() || gnum > RT.EffCaps.Length) {
+        DllCall("user32\SendMessageW", "Ptr", RT.edEffective.Hwnd
+              , "UInt", EM_SETSEL, "Ptr", 0, "Ptr", 0)
+        return
+    }
+    c := RT.EffCaps[gnum]
+    s := EffOffset(c.s + RT.EffBase), e := EffOffset(c.e + RT.EffBase)
+    DllCall("user32\SendMessageW", "Ptr", RT.edEffective.Hwnd
+          , "UInt", EM_SETSEL, "Ptr", s, "Ptr", e)
+    DllCall("user32\SendMessageW", "Ptr", RT.edEffective.Hwnd
+          , "UInt", EM_SCROLLCARET, "Ptr", 0, "Ptr", 0)
+}
+
 ; ============================== RESULT NAVIGATION =========================
 MatchRowFocused(jump := true) {
     row := RT.lvMatches.GetNext(, "F")
@@ -3424,6 +3513,7 @@ MatchRowFocused(jump := true) {
     Loop mm.Count
         RT.lvGroups.Add(, A_Index, mm.Name[A_Index], mm.Pos[A_Index], mm.Len[A_Index], OneLine(mm[A_Index]))
     RT.lvGroups.Opt("+Redraw")
+    HighlightEffGroup(0)                 ; the list just changed under it
     if (jump && !RT.NoJump && row <= RT.Spans.Length)
         SelectSpan(RT.Spans[row].s, RT.Spans[row].e)
 }
@@ -3438,6 +3528,10 @@ GroupRowFocused() {
         return
     mm := RT.Matches[mRow]
     idx := row - 1                                   ; row 1 is the whole match
+    ; Done before the Pos check below: a group that did not participate has no
+    ; position in the haystack but still has a definition in the pattern, and
+    ; showing WHERE it is, is most of the answer to why it came back empty.
+    HighlightEffGroup(idx)
     p := mm.Pos[idx], l := mm.Len[idx]
     if (!p)
         return
